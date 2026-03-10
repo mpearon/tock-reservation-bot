@@ -1,0 +1,51 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+htmlcov/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# === Virtual environments ===
+venv/
+env/
+ENV/
+.venv/
+.env/
+
+# === Secrets — NEVER COMMIT ===
+.env
+
+# === Bot runtime state (local only) ===
+session_cookies.json
+slot_tracker.json
+slot_tracker.csv
+bot.log
+
+# === Playwright ===
+playwright-report/
+test-results/
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === IDEs ===
+.vscode/
+.idea/
+*.swp
+*.swo
