@@ -232,6 +232,81 @@ class Notifier:
             logger.warning(f"[discord] Failed to send notification: {e}")
 
 
+    # ------------------------------------------------------------------
+    # Test helper
+    # ------------------------------------------------------------------
+
+    async def test_all_notifications(self) -> None:
+        """
+        Send one Discord message for each notification type and await each send.
+        Used by --test-notify.  Console output is always printed regardless of
+        whether a webhook URL is configured.
+        """
+        from types import SimpleNamespace
+
+        fake_slot = SimpleNamespace(
+            slot_date_str="2026-03-14",
+            day_of_week="Saturday",
+            slot_time="5:00 PM",
+        )
+
+        tests: list[tuple[str, str, int, list]] = [
+            (
+                "✅ Reservation Confirmed! [TEST]",
+                f"{fake_slot.slot_date_str} ({fake_slot.day_of_week}) @ {fake_slot.slot_time}\n"
+                f"Party of {self.config.party_size}",
+                _GREEN,
+                [
+                    ("Date", f"{fake_slot.slot_date_str} ({fake_slot.day_of_week})", True),
+                    ("Time", fake_slot.slot_time, True),
+                    ("Party", str(self.config.party_size), True),
+                    ("Restaurant", self.config.restaurant_slug, False),
+                ],
+            ),
+            (
+                "🟡 2 Slot(s) Available! [TEST]",
+                f"• {fake_slot.slot_date_str} ({fake_slot.day_of_week}) @ {fake_slot.slot_time}\n"
+                "• 2026-03-15 (Sunday) @ 5:30 PM",
+                _YELLOW,
+                [],
+            ),
+            (
+                "🎯 Sniper Mode Active [TEST]",
+                "Sniper mode ACTIVE on Friday — triggered at 16:59 PT, runs until 17:10 PT",
+                _ORANGE,
+                [
+                    ("Day", "Friday", True),
+                    ("Trigger", "16:59 PT", True),
+                    ("Until", "17:10 PT", True),
+                ],
+            ),
+            (
+                "⚠️ Bot Error [TEST]",
+                "**Checkout page not found**\nSelector checkout_container failed",
+                _RED,
+                [],
+            ),
+        ]
+
+        if not self._discord_enabled:
+            logger.warning(
+                "[test-notify] DISCORD_WEBHOOK_URL is not set — "
+                "printing console output only."
+            )
+
+        for title, description, color, fields in tests:
+            logger.info(f"[test-notify] Sending: {title}")
+            if self._discord_enabled:
+                await self._send_discord(title, description, color, fields)
+            else:
+                logger.info(f"  (Discord skipped — no webhook URL)")
+
+        logger.info(
+            f"[test-notify] Done. {len(tests)} message type(s) tested."
+            + (f"\n  Check your Discord channel to confirm delivery." if self._discord_enabled else "")
+        )
+
+
 def _fmt_interval(seconds: int) -> str:
     if seconds < 60:
         return f"{seconds}s"

@@ -110,9 +110,24 @@ SELECTORS: dict[str, str] = {
         '[data-testid="add-payment"]'
     ),
 
+    # CVC / security code input that appears on the checkout page when a
+    # saved card is on file (Tock requires re-entry of CVC per booking).
+    "cvc_input": (
+        'input[placeholder*="CVC" i], '
+        'input[placeholder*="CVV" i], '
+        'input[placeholder*="security code" i], '
+        'input[name="cvc"], '
+        'input[name="cvv"], '
+        'input[autocomplete="cc-csc"], '
+        '[data-testid*="cvc" i], '
+        '[data-testid*="cvv" i]'
+    ),
+
     # Final confirm button on the checkout page.
     # Tries multiple text variants Tock has used across UI versions.
+    # "Complete purchase" is the current wording when a card is charged.
     "confirm_button": (
+        'button:text("Complete purchase"), '
         'button:text("Complete reservation"), '
         'button:text("Confirm reservation"), '
         'button:text("Reserve now"), '

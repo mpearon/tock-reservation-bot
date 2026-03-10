@@ -15,6 +15,7 @@ class Config:
     # Credentials
     tock_email: str
     tock_password: str
+    card_cvc: str          # CVC for saved payment card; "" = not set
 
     # Notifications
     discord_webhook_url: str   # empty string = disabled
@@ -59,6 +60,7 @@ def load_config() -> Config:
     return Config(
         tock_email=email,
         tock_password=password,
+        card_cvc=os.getenv("TOCK_CARD_CVC", "").strip(),
         discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL", "").strip(),
         headless=os.getenv("HEADLESS", "false").lower() == "true",
         dry_run=os.getenv("DRY_RUN", "false").lower() == "true",

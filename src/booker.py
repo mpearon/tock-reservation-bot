@@ -127,7 +127,14 @@ class TockBooker:
             ):
                 return False
 
-            await page.wait_for_timeout(4000)  # calendar renders inside dropdown
+            # Wait for day buttons to render inside the calendar dropdown.
+            # Use wait_for_selector so we move on as soon as they're ready.
+            try:
+                await page.wait_for_selector(
+                    sel.get("available_day_button"), timeout=5000
+                )
+            except Exception:
+                pass  # day may not have is-available class yet; proceed anyway
 
             # ── Step 2: click the calendar day ────────────────────────
             if booking_won.is_set():
@@ -137,7 +144,8 @@ class TockBooker:
             if not await self._click_calendar_day(page, slot):
                 return False
 
-            await page.wait_for_timeout(1200)
+            # Wait for the slot list to start loading after the day click
+            await page.wait_for_timeout(400)
 
             # ── Step 3: click the time slot ───────────────────────────
             if booking_won.is_set():
@@ -147,7 +155,8 @@ class TockBooker:
             if not await self._click_time_slot(page, slot):
                 return False
 
-            await page.wait_for_timeout(2000)
+            # Brief tick so checkout navigation begins before we start waiting
+            await page.wait_for_timeout(200)
 
             # ── Step 4: wait for checkout page ────────────────────────
             if booking_won.is_set():
@@ -300,8 +309,6 @@ class TockBooker:
         │         └─ No card found   → pause, notify user, wait up to 9 min
         └─ Click confirm → wait for confirmation page → return True/False
         """
-        await page.wait_for_timeout(1000)
-
         needs_payment = await self._page_needs_payment(page)
         has_card = await self._has_saved_card(page)
 
@@ -330,6 +337,15 @@ class TockBooker:
                 )
                 return False
 
+        # Fill CVC for saved card if configured
+        if self.config.card_cvc:
+            await self._fill_cvc(page)
+        elif needs_payment and has_card:
+            logger.warning(
+                "[book] Saved card detected but TOCK_CARD_CVC is not set in .env — "
+                "checkout may fail if CVC is required."
+            )
+
         # Click confirm
         confirm_key = "confirm_button"
         confirm_selector = sel.get(confirm_key)
@@ -346,8 +362,7 @@ class TockBooker:
             )
             return False
 
-        # Verify confirmation
-        await page.wait_for_timeout(3000)
+        # Verify confirmation — wait_for_selector polls on its own, no fixed sleep needed
         confirmed_key = "booking_confirmed"
         confirmed_selector = sel.get(confirmed_key)
         try:
@@ -382,6 +397,30 @@ class TockBooker:
             return el2 is not None
         except Exception:
             return False
+
+    async def _fill_cvc(self, page: Page) -> None:
+        """Fill the CVC field on the checkout page if it exists.
+
+        Tock/Stripe may embed the CVC input inside an iframe, so we search
+        both the main frame and all child frames.
+        """
+        key = "cvc_input"
+        selector = sel.get(key)
+
+        # Search main frame first, then all iframes (Stripe embeds CVC in iframe)
+        frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
+        for frame in frames:
+            try:
+                el = await frame.query_selector(selector)
+                if el:
+                    await el.fill(self.config.card_cvc)
+                    label = frame.name or frame.url or "main"
+                    logger.info(f"[book] CVC filled (frame: {label}).")
+                    return
+            except Exception:
+                continue
+
+        logger.debug("[book] CVC field not found on page (may not be required).")
 
     async def _has_saved_card(self, page: Page) -> bool:
         """True if a saved payment card widget is visible."""
