@@ -69,7 +69,7 @@ def load_config() -> Config:
             for d in os.getenv("PREFERRED_DAYS", "Friday,Saturday,Sunday").split(",")
         ],
         preferred_time=os.getenv("PREFERRED_TIME", "17:00"),
-        scan_weeks=int(os.getenv("SCAN_WEEKS", "4")),
+        scan_weeks=int(os.getenv("SCAN_WEEKS", "2")),
         release_window_days=[
             d.strip()
             for d in os.getenv("RELEASE_WINDOW_DAYS", "Monday").split(",")
