@@ -92,8 +92,12 @@ class TockMonitor:
             if was_sniper and not now_sniper:
                 self.notifier.sniper_mode_ended(self._poll_count)
 
-            logger.info(f"Sleeping {interval}s…")
-            await asyncio.sleep(interval)
+            if interval > 0:
+                logger.info(f"Sleeping {interval}s…")
+                await asyncio.sleep(interval)
+            else:
+                # Sniper mode: zero sleep — yield control briefly then immediately re-poll
+                await asyncio.sleep(0)
 
     async def poll(self) -> None:
         """One full check-and-book cycle."""
@@ -107,8 +111,9 @@ class TockMonitor:
             return
 
         # --- Availability check ---
+        # Sniper mode checks all dates concurrently for maximum speed
         try:
-            slots = await self.checker.check_all()
+            slots = await self.checker.check_all(concurrent=self._sniper_active)
         except Exception as e:
             logger.error(f"[monitor] Availability check error: {e}")
             self.notifier.error("Availability check error", str(e))
@@ -157,7 +162,7 @@ class TockMonitor:
         day_name = now.strftime("%A")
         t = now.time()
 
-        # 1. Sniper mode
+        # 1. Sniper mode — zero sleep between polls; the page load is the rate limiter
         sniper_info = self._sniper_window_info(now)
         if sniper_info is not None:
             until_str = sniper_info
@@ -170,9 +175,9 @@ class TockMonitor:
                 )
             logger.debug(
                 f"[schedule] SNIPER MODE ({day_name} {t.strftime('%H:%M')} PT, "
-                f"until {until_str}) → {self.config.sniper_interval_sec}s"
+                f"until {until_str}) → 0s (continuous)"
             )
-            return self.config.sniper_interval_sec
+            return 0
         else:
             self._sniper_active = False
 

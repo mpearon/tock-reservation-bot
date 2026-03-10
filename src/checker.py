@@ -58,22 +58,36 @@ class AvailabilityChecker:
     # Public
     # ------------------------------------------------------------------
 
-    async def check_all(self) -> list[AvailableSlot]:
+    async def check_all(self, concurrent: bool = False) -> list[AvailableSlot]:
         """
         Check every preferred-weekday date within the next SCAN_WEEKS weeks.
         Returns all found slots (each date's slots sorted by proximity to
         preferred_time, then dates sorted chronologically).
+
+        concurrent=True: check all dates in parallel (used by sniper mode for speed).
+        concurrent=False: check dates sequentially (default, gentler on the server).
         """
         target_dates = self._get_target_dates()
         logger.debug(
-            f"Scanning {len(target_dates)} date(s): "
+            f"Scanning {len(target_dates)} date(s) [{'concurrent' if concurrent else 'sequential'}]: "
             + ", ".join(d.isoformat() for d in target_dates)
         )
 
-        all_slots: list[AvailableSlot] = []
-        for target_date in target_dates:
-            slots = await self._check_date(target_date)
-            all_slots.extend(slots)
+        if concurrent:
+            import asyncio
+            results = await asyncio.gather(
+                *[self._check_date(d) for d in target_dates],
+                return_exceptions=True,
+            )
+            all_slots: list[AvailableSlot] = []
+            for r in results:
+                if isinstance(r, list):
+                    all_slots.extend(r)
+        else:
+            all_slots = []
+            for target_date in target_dates:
+                slots = await self._check_date(target_date)
+                all_slots.extend(slots)
 
         logger.info(
             f"Scan complete — {len(all_slots)} slot(s) found "
@@ -119,7 +133,14 @@ class AvailabilityChecker:
             if not await self._wait_for_calendar(page, date_str):
                 return []
 
-            await page.wait_for_timeout(4000)  # calendar renders inside dropdown — needs time
+            # Wait for day buttons to appear inside the calendar (selector-based,
+            # no fixed sleep — moves on as soon as buttons are ready)
+            try:
+                await page.wait_for_selector(
+                    sel.get("available_day_button"), timeout=5000
+                )
+            except Exception:
+                pass  # no available days this month; _is_day_available will return False
 
             # Is our target day marked as available?
             if not await self._is_day_available(page, target_date):
@@ -130,7 +151,13 @@ class AvailabilityChecker:
             if not await self._click_day(page, target_date):
                 return []
 
-            await page.wait_for_timeout(1200)
+            # Wait for slot buttons to appear (selector-based, not a fixed sleep)
+            try:
+                await page.wait_for_selector(
+                    sel.get("available_slot_button"), timeout=3000
+                )
+            except Exception:
+                pass  # no slots visible yet; _collect_slots will return []
 
             # Collect and sort time slots
             slots = await self._collect_slots(page, target_date)
