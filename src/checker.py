@@ -58,45 +58,89 @@ class AvailabilityChecker:
     # Public
     # ------------------------------------------------------------------
 
-    async def check_all(self) -> list[AvailableSlot]:
+    async def check_all(self, concurrent: bool = False) -> list[AvailableSlot]:
         """
-        Check every preferred-weekday date within the next SCAN_WEEKS weeks.
-        Returns all found slots (each date's slots sorted by proximity to
-        preferred_time, then dates sorted chronologically).
+        Scan for available slots in two phases:
 
-        Dates are checked sequentially to avoid triggering Cloudflare rate
-        limits — concurrent bursts cause ~70% of requests to be blocked.
-        Speed comes from selector-based waits instead of fixed sleeps.
+        Phase 1 — preferred_days (e.g. Fri/Sat/Sun): checked first. If any
+          slots found, return them immediately without scanning fallback days.
+
+        Phase 2 — fallback_days (e.g. Mon–Thu): only scanned when Phase 1
+          finds nothing. Slots from fallback days are returned sorted by
+          proximity to preferred_time, same as preferred slots.
+
+        concurrent=False (default): sequential per date — avoids Cloudflare
+          rate-limiting (concurrent bursts cause ~70% blocks at 28 dates).
+        concurrent=True: parallel per date — only for benchmarking/testing.
         """
-        target_dates = self._get_target_dates()
-        logger.debug(
-            f"Scanning {len(target_dates)} date(s): "
-            + ", ".join(d.isoformat() for d in target_dates)
-        )
+        import asyncio as _asyncio
 
-        all_slots: list[AvailableSlot] = []
-        for target_date in target_dates:
-            slots = await self._check_date(target_date)
-            all_slots.extend(slots)
+        async def _scan_dates(dates: list[date]) -> list[AvailableSlot]:
+            if not dates:
+                return []
+            logger.debug(
+                f"Scanning {len(dates)} date(s) [{'concurrent' if concurrent else 'sequential'}]: "
+                + ", ".join(d.isoformat() for d in dates)
+            )
+            if concurrent:
+                results = await _asyncio.gather(
+                    *[self._check_date(d) for d in dates],
+                    return_exceptions=True,
+                )
+                slots: list[AvailableSlot] = []
+                for r in results:
+                    if isinstance(r, list):
+                        slots.extend(r)
+                return slots
+            else:
+                slots = []
+                for d in dates:
+                    slots.extend(await self._check_date(d))
+                return slots
 
+        preferred_dates = self._get_target_dates(self.config.preferred_days)
+        preferred_slots = await _scan_dates(preferred_dates)
+
+        if preferred_slots:
+            logger.info(
+                f"Scan complete — {len(preferred_slots)} slot(s) found "
+                f"across {len(preferred_dates)} preferred date(s)"
+            )
+            return preferred_slots
+
+        # No preferred slots — try fallback days if configured
+        fallback_dates = self._get_target_dates(self.config.fallback_days)
+        if not fallback_dates:
+            logger.info(
+                f"Scan complete — 0 slot(s) found across "
+                f"{len(preferred_dates)} date(s) (no fallback days configured)"
+            )
+            return []
+
+        fallback_slots = await _scan_dates(fallback_dates)
+        total_dates = len(preferred_dates) + len(fallback_dates)
         logger.info(
-            f"Scan complete — {len(all_slots)} slot(s) found "
-            f"across {len(target_dates)} date(s)"
+            f"Scan complete — {len(fallback_slots)} fallback slot(s) found "
+            f"across {total_dates} date(s) total "
+            f"(0 preferred + {len(fallback_slots)} fallback)"
         )
-        return all_slots
+        return fallback_slots
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _get_target_dates(self) -> list[date]:
-        """All preferred-weekday dates from tomorrow through SCAN_WEEKS weeks."""
+    def _get_target_dates(self, days: list[str] | None = None) -> list[date]:
+        """Dates from tomorrow through SCAN_WEEKS weeks that fall on *days*.
+        Defaults to config.preferred_days when days is None."""
+        if days is None:
+            days = self.config.preferred_days
         today = date.today()
         end = today + timedelta(weeks=self.config.scan_weeks)
         result = []
         current = today + timedelta(days=1)
         while current <= end:
-            if current.strftime("%A") in self.config.preferred_days:
+            if current.strftime("%A") in days:
                 result.append(current)
             current += timedelta(days=1)
         return result

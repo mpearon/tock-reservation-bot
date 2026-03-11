@@ -31,7 +31,8 @@ class Config:
 
     # Booking preferences
     party_size: int
-    preferred_days: list[str]   # e.g. ["Friday", "Saturday", "Sunday"]
+    preferred_days: list[str]   # e.g. ["Friday", "Saturday", "Sunday"] — booked first
+    fallback_days: list[str]    # e.g. ["Monday", "Tuesday"] — only if no preferred slots found
     preferred_time: str         # e.g. "17:00" (24-hour)
     scan_weeks: int
 
@@ -69,6 +70,11 @@ def load_config() -> Config:
         preferred_days=[
             d.strip()
             for d in os.getenv("PREFERRED_DAYS", "Friday,Saturday,Sunday").split(",")
+        ],
+        fallback_days=[
+            d.strip()
+            for d in os.getenv("FALLBACK_DAYS", "").split(",")
+            if d.strip()
         ],
         preferred_time=os.getenv("PREFERRED_TIME", "17:00"),
         scan_weeks=int(os.getenv("SCAN_WEEKS", "2")),

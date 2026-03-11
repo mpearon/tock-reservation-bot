@@ -262,26 +262,44 @@ async def _test_sniper_mode(
     browser, config, test_slug: str, num_polls: int, logger
 ) -> None:
     """
-    Simulate the sniper polling loop against *test_slug* for *num_polls*
-    iterations with DRY_RUN forced — never books anything.
+    Run the sniper poll loop against *test_slug* for *num_polls* iterations,
+    first sequential then concurrent — same dates both times for a fair
+    apples-to-apples comparison. DRY_RUN is forced; nothing is ever booked.
 
-    Uses sequential date checking (same as real sniper mode) so the error
-    rate accurately reflects what Fuhuihua sniper will experience.
-    Counts SELECTOR_FAILED calendar_container errors per poll as a proxy
-    for Cloudflare rate-limiting.
+    Uses the exact same preferred_days and scan_weeks as the real bot config
+    so the date count matches what Fuhuihua sniper will actually check.
     """
     import logging as _logging
+    from datetime import date, timedelta
     from src.checker import AvailabilityChecker
     from src.tracker import SlotTracker
 
-    # Mirror the real Fuhuihua sniper config: preferred days + 2-week scan
+    # Override restaurant and dry_run; scan ALL days (preferred + fallback)
+    # so the date count matches the real worst-case load (Phase 1 misses,
+    # Phase 2 fallback also runs — maximum pages opened per cycle)
+    all_scan_days = list(dict.fromkeys(
+        config.preferred_days + config.fallback_days
+        or ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+    ))
     test_config = config.__class__(**{
         **config.__dict__,
         "restaurant_slug": test_slug,
         "dry_run": True,
+        # Flatten preferred+fallback into preferred so check_all scans all of them
+        "preferred_days": all_scan_days,
+        "fallback_days": [],
     })
 
-    # Intercept checker log records to count calendar errors per poll
+    # Count dates per poll
+    today = date.today()
+    end = today + timedelta(weeks=test_config.scan_weeks)
+    dates_per_poll = sum(
+        1 for i in range(1, test_config.scan_weeks * 7 + 1)
+        if (d := today + timedelta(days=i)) <= end
+        and d.strftime("%A") in test_config.preferred_days
+    )
+
+    # Log handler that counts calendar_container SELECTOR_FAILED lines
     class _ErrorCounter(_logging.Handler):
         def __init__(self):
             super().__init__()
@@ -296,77 +314,82 @@ async def _test_sniper_mode(
     counter = _ErrorCounter()
     _logging.getLogger("src.checker").addHandler(counter)
 
-    tracker = SlotTracker()
-    checker = AvailabilityChecker(test_config, browser, tracker)
-
-    total_calendar_errors = 0
-    total_date_checks = 0
-    slots_seen = 0
-
     logger.info(
         f"\n{'='*60}\n"
-        f"[test-sniper] Starting sniper poll test\n"
+        f"[test-sniper] Sniper poll benchmark\n"
         f"  Restaurant  : {test_slug}\n"
-        f"  Polls       : {num_polls}\n"
-        f"  Scan window : {test_config.scan_weeks} weeks, "
-        f"{', '.join(test_config.preferred_days)}\n"
+        f"  Polls each  : {num_polls} (sequential first, then concurrent)\n"
+        f"  Dates/poll  : {dates_per_poll} "
+        f"({test_config.scan_weeks} weeks × {', '.join(test_config.preferred_days)})\n"
         f"  Booking     : DISABLED (DRY_RUN forced)\n"
         f"{'='*60}"
     )
 
-    from datetime import date, timedelta
-    # Count how many dates will be checked per poll
-    today = date.today()
-    end = today + timedelta(weeks=test_config.scan_weeks)
-    cur = today + timedelta(days=1)
-    dates_per_poll = sum(
-        1 for _ in iter(lambda: None, None)
-        if (cur := cur + timedelta(days=1)) and cur > end
-        or True
-    )
-    # simpler: just count them
-    dates_per_poll = sum(
-        1 for d in (today + timedelta(days=i) for i in range(1, test_config.scan_weeks * 7 + 1))
-        if d.strftime("%A") in test_config.preferred_days and d <= end
-    )
+    async def _run_mode(label: str, concurrent: bool) -> tuple[float, int, int]:
+        """Run num_polls polls and return (avg_seconds, total_errors, total_slots)."""
+        tracker = SlotTracker()
+        checker = AvailabilityChecker(test_config, browser, tracker)
+        times: list[float] = []
+        total_errors = 0
+        total_slots = 0
 
-    for i in range(1, num_polls + 1):
-        logger.info(f"[test-sniper] ── Poll {i}/{num_polls} ──────────────────────")
-        counter.reset()
-        t0 = asyncio.get_event_loop().time()
-        try:
-            slots = await checker.check_all()
-            elapsed = asyncio.get_event_loop().time() - t0
-            cal_errors = counter.reset()
-            total_calendar_errors += cal_errors
-            total_date_checks += dates_per_poll
-            slots_seen += len(slots)
+        logger.info(f"\n[test-sniper] === {label} mode ===")
+        for i in range(1, num_polls + 1):
+            counter.reset()
+            t0 = asyncio.get_event_loop().time()
+            try:
+                slots = await checker.check_all(concurrent=concurrent)
+                elapsed = asyncio.get_event_loop().time() - t0
+                cal_errors = counter.reset()
+                total_errors += cal_errors
+                total_slots += len(slots)
+                times.append(elapsed)
+                status = f"{len(slots)} slot(s) found" if slots else "no slots"
+                logger.info(
+                    f"[test-sniper] {label} poll {i}/{num_polls} → {status}  "
+                    f"({elapsed:.1f}s, calendar errors: {cal_errors}/{dates_per_poll})"
+                )
+                for s in slots:
+                    logger.info(f"  • {s}  (would book in real mode)")
+            except Exception as e:
+                elapsed = asyncio.get_event_loop().time() - t0
+                logger.error(
+                    f"[test-sniper] {label} poll {i} → EXCEPTION "
+                    f"after {elapsed:.1f}s: {e}"
+                )
+                times.append(elapsed)
+            await asyncio.sleep(0)
 
-            status = f"{len(slots)} slot(s) found" if slots else "no slots"
-            logger.info(
-                f"[test-sniper] Poll {i} → {status}  "
-                f"({elapsed:.1f}s, calendar errors: {cal_errors}/{dates_per_poll})"
-            )
-            for s in slots:
-                logger.info(f"  • {s}  (would book in real mode)")
-        except Exception as e:
-            elapsed = asyncio.get_event_loop().time() - t0
-            logger.error(f"[test-sniper] Poll {i} → EXCEPTION after {elapsed:.1f}s: {e}")
+        avg = sum(times) / len(times) if times else 0
+        return avg, total_errors, total_slots
 
-        await asyncio.sleep(0)
+    seq_avg, seq_errors, seq_slots = await _run_mode("Sequential", concurrent=False)
+    con_avg, con_errors, con_slots = await _run_mode("Concurrent", concurrent=True)
 
     _logging.getLogger("src.checker").removeHandler(counter)
 
-    error_rate = total_calendar_errors / total_date_checks if total_date_checks else 0
+    total_checks = num_polls * dates_per_poll
+    seq_rate = seq_errors / total_checks if total_checks else 0
+    con_rate = con_errors / total_checks if total_checks else 0
+
+    def _verdict(rate: float) -> str:
+        return "⚠️  HIGH — Cloudflare blocking" if rate > 0.2 else "✓ acceptable"
+
     logger.info(
         f"\n{'='*60}\n"
-        f"[test-sniper] RESULTS\n"
-        f"  Polls run          : {num_polls}\n"
-        f"  Dates per poll     : {dates_per_poll}\n"
-        f"  Calendar errors    : {total_calendar_errors}/{total_date_checks} "
-        f"({error_rate:.0%}) "
-        f"{'⚠️  HIGH — Cloudflare blocking' if error_rate > 0.2 else '✓ acceptable'}\n"
-        f"  Slots seen total   : {slots_seen}\n"
+        f"[test-sniper] COMPARISON RESULTS ({dates_per_poll} dates/poll)\n"
+        f"\n"
+        f"  Sequential:\n"
+        f"    Avg cycle time   : {seq_avg:.1f}s\n"
+        f"    Calendar errors  : {seq_errors}/{total_checks} "
+        f"({seq_rate:.0%}) {_verdict(seq_rate)}\n"
+        f"    Slots found      : {seq_slots}\n"
+        f"\n"
+        f"  Concurrent:\n"
+        f"    Avg cycle time   : {con_avg:.1f}s\n"
+        f"    Calendar errors  : {con_errors}/{total_checks} "
+        f"({con_rate:.0%}) {_verdict(con_rate)}\n"
+        f"    Slots found      : {con_slots}\n"
         f"{'='*60}"
     )
 
@@ -462,6 +485,8 @@ async def main() -> None:
     logger.info(f"  Restaurant : {config.restaurant_slug}")
     logger.info(f"  Party size : {config.party_size}")
     logger.info(f"  Prefer days: {', '.join(config.preferred_days)}")
+    if config.fallback_days:
+        logger.info(f"  Fallback   : {', '.join(config.fallback_days)} (if no preferred slots)")
     logger.info(f"  Prefer time: {config.preferred_time}")
     logger.info(f"  Scan range : {config.scan_weeks} weeks")
     logger.info(f"  Release win: {config.release_window_days} "
