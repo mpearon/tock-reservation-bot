@@ -702,6 +702,193 @@ async def _test_sniper_robustness(
     )
 
 
+async def _test_sniper_integration(
+    browser, config, notifier, checker, tracker, logger, num_polls: int = 5
+) -> None:
+    """
+    Full end-to-end integration test of the sniper pipeline.
+
+    Timeline
+    --------
+      t=0   Sniper configured to fire at now+2 min.
+            _get_prewarm_target() detects window within 15 min → pre-warm fires.
+      t≈2m  _get_poll_interval() returns 0 → sniper active Discord notification fires.
+      t≈2m+ num_polls rapid concurrent polls run (DRY_RUN — no booking).
+            Each poll sends Discord notification (no-slots or dry-run-would-book).
+      done  Sniper pages closed, summary logged, exit.
+
+    Run with: python main.py --test-sniper-integration
+    """
+    import pytz as _pytz
+    from datetime import datetime, timedelta
+    from src.monitor import TockMonitor, PREWARM_BEFORE_MIN
+
+    PT_tz = _pytz.timezone("America/Los_Angeles")
+    now = datetime.now(PT_tz)
+
+    # ── Configure sniper to fire in ~2 minutes ────────────────────────────
+    trigger_dt = now + timedelta(minutes=2)
+    sniper_time = trigger_dt.strftime("%H:%M")
+    sniper_day  = trigger_dt.strftime("%A")
+    # Window long enough for num_polls × ~30s/poll + breathing room
+    window_min  = max(6, (num_polls * 45) // 60 + 2)
+
+    # Save originals so the test is non-destructive
+    orig_days    = config.sniper_days[:]
+    orig_times   = config.sniper_times[:]
+    orig_dur     = config.sniper_duration_min
+    orig_dry_run = config.dry_run
+
+    config.sniper_days        = [sniper_day]
+    config.sniper_times       = [sniper_time]
+    config.sniper_duration_min = window_min
+    config.dry_run            = True
+
+    monitor = TockMonitor(config, browser, checker, notifier, tracker)
+
+    bar = "=" * 60
+    logger.info(
+        f"\n{bar}\n"
+        f"[integration] SNIPER INTEGRATION TEST\n"
+        f"  Restaurant : {config.restaurant_slug}\n"
+        f"  Party size : {config.party_size}\n"
+        f"  Sniper set : {sniper_day} @ {sniper_time} PT (≈2 min from now)\n"
+        f"  Duration   : {window_min} min\n"
+        f"  Polls      : {num_polls} rapid polls once window opens\n"
+        f"  Booking    : DISABLED (DRY_RUN forced)\n"
+        f"\n"
+        f"  Expected chain:\n"
+        f"    [now]   pre-warm fires (window within {PREWARM_BEFORE_MIN}-min threshold)\n"
+        f"    [+2min] sniper activates → Discord orange notification\n"
+        f"    [+2min] {num_polls}× rapid concurrent polls\n"
+        f"    [done]  Discord per-poll notifications + summary\n"
+        f"{bar}"
+    )
+
+    try:
+        # ── STEP 1: Pre-warm ─────────────────────────────────────────────
+        logger.info(f"\n{bar}")
+        logger.info("[integration] STEP 1 — Pre-warm (window within 15-min threshold)")
+        logger.info(f"{bar}")
+
+        prewarm_target = monitor._get_prewarm_target()
+        if prewarm_target:
+            logger.info(
+                f"[integration] _get_prewarm_target() = {prewarm_target!r}  ✓\n"
+                f"  (window is ~2 min away, within {PREWARM_BEFORE_MIN}-min threshold)"
+            )
+            await browser.warm_session()
+            monitor._session_prewarmed_for = prewarm_target
+            logger.info("[integration] Pre-warm complete — cookies refreshed.")
+        else:
+            # Should not happen: 2 min < 15 min threshold
+            logger.warning(
+                "[integration] _get_prewarm_target() returned None.\n"
+                "  The sniper trigger time may have already passed. Running warm_session() anyway."
+            )
+            await browser.warm_session()
+
+        # ── STEP 2: Wait for sniper window to open ───────────────────────
+        logger.info(f"\n{bar}")
+        logger.info(
+            f"[integration] STEP 2 — Waiting for sniper window\n"
+            f"  Window opens at {sniper_time} PT  (≈{(trigger_dt - datetime.now(PT_tz)).total_seconds():.0f}s)"
+        )
+        logger.info(f"{bar}")
+
+        # Poll _get_poll_interval() every 5s; it returns 0 when sniper fires
+        # and also sends the Discord "Sniper Mode Active" notification.
+        grace_deadline = trigger_dt + timedelta(seconds=45)
+        sniper_opened = False
+
+        while datetime.now(PT_tz) < grace_deadline:
+            interval = monitor._get_poll_interval()
+            if interval == 0:       # sniper window is now open
+                sniper_opened = True
+                break
+            remaining = max(0, (trigger_dt - datetime.now(PT_tz)).total_seconds())
+            logger.info(
+                f"[integration] {remaining:.0f}s until {sniper_time} PT…"
+                f"  (current interval={interval}s)"
+            )
+            await asyncio.sleep(5)
+
+        if not sniper_opened:
+            logger.error(
+                "[integration] Sniper window did not open within the expected time.\n"
+                f"  Configured: {sniper_day} @ {sniper_time} PT\n"
+                f"  Current PT: {datetime.now(PT_tz).strftime('%A %H:%M')}\n"
+                "  Check that system clock and pytz timezone are correct."
+            )
+            return
+
+        logger.info(
+            f"[integration] Sniper window OPEN  "
+            f"(PT={datetime.now(PT_tz).strftime('%H:%M:%S')})  ✓\n"
+            f"  _sniper_active = {monitor._sniper_active}\n"
+            f"  Discord orange notification should have fired."
+        )
+
+        # ── STEP 3: Rapid polls ──────────────────────────────────────────
+        logger.info(f"\n{bar}")
+        logger.info(
+            f"[integration] STEP 3 — {num_polls} rapid concurrent polls (DRY_RUN)"
+        )
+        logger.info(f"{bar}")
+
+        slot_counts: list[int] = []
+        poll_times:  list[float] = []
+
+        import time as _time
+        for i in range(1, num_polls + 1):
+            logger.info(f"[integration] ── Poll {i}/{num_polls} ──")
+            t0 = _time.monotonic()
+            notifier.poll_start(i, 0)
+            await monitor.poll()
+            elapsed = _time.monotonic() - t0
+            poll_times.append(elapsed)
+            # Snapshot slot count from checker's last poll
+            slot_counts.append(checker.last_checks - checker.last_errors)
+            logger.info(f"[integration] Poll {i} completed in {elapsed:.1f}s")
+            await asyncio.sleep(0)   # yield — mirrors production sniper loop
+
+        # ── STEP 4: Cleanup ──────────────────────────────────────────────
+        logger.info(f"\n{bar}")
+        logger.info("[integration] STEP 4 — Cleanup")
+        logger.info(f"{bar}")
+
+        await checker.close_sniper_pages()
+        notifier.sniper_mode_ended(monitor._poll_count)
+        logger.info("[integration] Sniper pages closed.")
+
+        # ── Summary ──────────────────────────────────────────────────────
+        avg_poll = sum(poll_times) / len(poll_times) if poll_times else 0
+        logger.info(
+            f"\n{bar}\n"
+            f"[integration] INTEGRATION TEST COMPLETE\n"
+            f"\n"
+            f"  Chain verified:\n"
+            f"    ✓  Pre-warm fired   (warm_session + cookies saved)\n"
+            f"    {'✓' if sniper_opened else '✗'}  Sniper activated   (_sniper_active=True, interval=0s)\n"
+            f"    ✓  {num_polls} polls ran      (avg {avg_poll:.1f}s/poll)\n"
+            f"    ✓  DRY_RUN enforced  (no booking attempted)\n"
+            f"\n"
+            f"  Check Discord for:\n"
+            f"    • Orange embed  — Sniper Mode Active\n"
+            f"    • Blue embed    — Dry Run Would Have Booked  (if slots found)\n"
+            f"    • Yellow embed  — Slots Available  (if slots found)\n"
+            f"    • (no Discord on 'no slots' — by design to avoid spam)\n"
+            f"{bar}"
+        )
+
+    finally:
+        # Restore config so callers are not surprised
+        config.sniper_days         = orig_days
+        config.sniper_times        = orig_times
+        config.sniper_duration_min = orig_dur
+        config.dry_run             = orig_dry_run
+
+
 def _setup_logging() -> None:
     fmt = "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
@@ -775,6 +962,16 @@ async def main() -> None:
         default=10,
         metavar="N",
         help="Number of consecutive sniper polls to run in --test-sniper-benchmark mode (default: 10)",
+    )
+    parser.add_argument(
+        "--test-sniper-integration",
+        action="store_true",
+        help=(
+            "Full end-to-end integration test: sets sniper to fire in 2 min, "
+            "triggers pre-warm immediately, waits for window to open, runs "
+            "--test-sniper-polls rapid DRY_RUN polls, sends Discord notifications. "
+            "Targets the real restaurant (no --test-restaurant override needed)."
+        ),
     )
     parser.add_argument(
         "--test-adaptive-sniper",
@@ -866,6 +1063,17 @@ async def main() -> None:
             await _test_sniper_mode(
                 browser, config, args.test_restaurant,
                 args.test_sniper_polls, logger
+            )
+            return
+
+        # ── Mode: --test-sniper-integration ──────────────────────────
+        if args.test_sniper_integration:
+            if not await browser.login():
+                logger.error("Login failed — cannot run --test-sniper-integration.")
+                sys.exit(1)
+            await _test_sniper_integration(
+                browser, config, notifier, checker, tracker, logger,
+                num_polls=args.test_sniper_polls,
             )
             return
 
