@@ -246,14 +246,17 @@ class TockBrowser:
         try:
             logger.info(f"[warm] Refreshing session: {url}")
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(3000)  # let CF JS settle
+            # Wait for network to settle (Cloudflare JS runs after domcontentloaded)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass  # networkidle timeout is fine; proceed with current state
 
             if not await self._is_logged_in(page):
                 logger.warning(
                     "[warm] Session appears expired — re-authenticating before sniper fires."
                 )
                 await page.close()
-                page = None
                 await self.login()
                 return
 
@@ -262,11 +265,10 @@ class TockBrowser:
         except Exception as e:
             logger.warning(f"[warm] Session warm failed (non-critical): {e}")
         finally:
-            if page is not None:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
+            try:
+                await page.close()
+            except Exception:
+                pass
 
     async def _is_logged_in(self, page: Page) -> bool:
         """Return True if an authenticated-only element is present on the page."""
@@ -280,6 +282,28 @@ class TockBrowser:
         cookies = await self._context.cookies()
         COOKIES_FILE.write_text(json.dumps(cookies, indent=2))
         logger.debug(f"Saved {len(cookies)} cookies → {COOKIES_FILE}")
+
+    async def get_cookies(self) -> list[dict]:
+        """Return all cookies in the current browser context."""
+        return await self._context.cookies()
+
+    @staticmethod
+    async def find_in_frames(page: Page, selector: str):
+        """
+        Search the main frame and all child iframes for *selector*.
+        Returns the first matching element, or None.
+
+        Tock embeds some inputs (e.g. CVC) inside Stripe iframes, so a plain
+        page.query_selector() misses them.
+        """
+        for frame in [page.main_frame] + [f for f in page.frames if f != page.main_frame]:
+            try:
+                el = await frame.query_selector(selector)
+                if el:
+                    return el
+            except Exception:
+                continue
+        return None
 
     # ------------------------------------------------------------------
     # Resilient selector helpers

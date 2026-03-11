@@ -5,6 +5,7 @@ All settings live here — nothing else imports os.getenv directly.
 
 import os
 from dataclasses import dataclass, field
+from datetime import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -95,3 +96,9 @@ def load_config() -> Config:
         sniper_duration_min=int(os.getenv("SNIPER_DURATION_MIN", "11")),
         sniper_interval_sec=int(os.getenv("SNIPER_INTERVAL_SEC", "3")),
     )
+
+
+def parse_time(s: str) -> time:
+    """Parse 'HH:MM' into datetime.time. Used by monitor and checker."""
+    h, m = map(int, s.split(":"))
+    return time(h, m)

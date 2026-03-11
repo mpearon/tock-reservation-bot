@@ -346,16 +346,25 @@ class TockBooker:
                 "checkout may fail if CVC is required."
             )
 
-        # Click confirm — retry once in case of transient failure under server load
+        # Wait once for the confirm button, then click with one retry on transient failure.
+        # Waiting once (not per-retry) avoids a potential 30s timeout in the hot path.
         confirm_key = "confirm_button"
         confirm_selector = sel.get(confirm_key)
-        clicked = False
+        try:
+            await page.wait_for_selector(confirm_selector, timeout=15000)
+        except Exception as e:
+            logger.error(
+                f"SELECTOR_FAILED: key='{confirm_key}'  selector={confirm_selector!r}\n"
+                f"  Confirm button not found on page.\n"
+                f"  Current URL: {page.url}\n"
+                f"  → Update src/selectors.py  Error: {e}"
+            )
+            return False
+
         for click_attempt in range(2):
             try:
-                await page.wait_for_selector(confirm_selector, timeout=15000)
                 await page.click(confirm_selector)
                 logger.info("[book] Clicked confirm button.")
-                clicked = True
                 break
             except Exception as e:
                 if click_attempt == 0:
@@ -366,12 +375,11 @@ class TockBooker:
                 else:
                     logger.error(
                         f"SELECTOR_FAILED: key='{confirm_key}'  selector={confirm_selector!r}\n"
-                        f"  Could not find or click the confirm button after 2 attempts.\n"
+                        f"  Could not click the confirm button after 2 attempts.\n"
                         f"  Current URL: {page.url}\n"
                         f"  → Update src/selectors.py  Error: {e}"
                     )
-        if not clicked:
-            return False
+                    return False
 
         # Verify confirmation.
         # Use 30s timeout (vs 20s) to handle slow Tock servers under heavy traffic.
@@ -425,23 +433,14 @@ class TockBooker:
         Tock/Stripe may embed the CVC input inside an iframe, so we search
         both the main frame and all child frames.
         """
-        key = "cvc_input"
-        selector = sel.get(key)
-
-        # Search main frame first, then all iframes (Stripe embeds CVC in iframe)
-        frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
-        for frame in frames:
-            try:
-                el = await frame.query_selector(selector)
-                if el:
-                    await el.fill(self.config.card_cvc)
-                    label = frame.name or frame.url or "main"
-                    logger.info(f"[book] CVC filled (frame: {label}).")
-                    return
-            except Exception:
-                continue
-
-        logger.debug("[book] CVC field not found on page (may not be required).")
+        selector = sel.get("cvc_input")
+        # TockBrowser.find_in_frames searches main frame + all iframes (Stripe embeds CVC)
+        el = await self.browser.find_in_frames(page, selector)
+        if el:
+            await el.fill(self.config.card_cvc)
+            logger.info("[book] CVC filled.")
+        else:
+            logger.debug("[book] CVC field not found on page (may not be required).")
 
     async def _has_saved_card(self, page: Page) -> bool:
         """True if a saved payment card widget is visible."""

@@ -29,13 +29,13 @@ All times are evaluated in America/Los_Angeles (PT/PDT automatically).
 
 import asyncio
 import logging
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 
 import pytz
 
 from src.booker import TockBooker
 from src.checker import AvailabilityChecker
-from src.config import Config
+from src.config import Config, parse_time
 from src.notifier import Notifier
 from src.release_detector import CHECK_INTERVAL_MIN, apply_release_schedule, detect_release_time
 from src.tracker import SlotTracker
@@ -73,12 +73,9 @@ class TockMonitor:
         # Cloudflare error rate gets too high, retry concurrent after recovery.
         self._sniper_concurrent = True          # current mode for sniper polls
         self._sniper_error_window: list[float] = []  # rolling error rates (last N polls)
-        _SNIPER_WINDOW_SIZE   = 3    # look at last 3 polls to decide
-        _SNIPER_ERROR_THRESH  = 0.20 # >20% errors → switch to sequential
-        _SNIPER_RECOVER_POLLS = 3    # consecutive clean sequential polls → try concurrent again
-        self._SNIPER_WINDOW_SIZE   = _SNIPER_WINDOW_SIZE
-        self._SNIPER_ERROR_THRESH  = _SNIPER_ERROR_THRESH
-        self._SNIPER_RECOVER_POLLS = _SNIPER_RECOVER_POLLS
+        self._SNIPER_WINDOW_SIZE   = 3    # look at last 3 polls to decide
+        self._SNIPER_ERROR_THRESH  = 0.20 # >20% errors → switch to sequential
+        self._SNIPER_RECOVER_POLLS = 3    # consecutive clean sequential polls → try concurrent again
         self._sniper_sequential_clean = 0  # consecutive clean polls in sequential mode
 
         # Release-time auto-detection: re-check every CHECK_INTERVAL_MIN
@@ -346,8 +343,8 @@ class TockMonitor:
             self._sniper_active = False
 
         # 2. Normal release window
-        release_start = _parse_time(self.config.release_window_start)
-        release_end = _parse_time(self.config.release_window_end)
+        release_start = parse_time(self.config.release_window_start)
+        release_end = parse_time(self.config.release_window_end)
         if (
             day_name in self.config.release_window_days
             and release_start <= t <= release_end
@@ -390,18 +387,9 @@ class TockMonitor:
         duration = timedelta(minutes=self.config.sniper_duration_min)
 
         for start_str in self.config.sniper_times:
-            window_start = _parse_time(start_str)
-            # Compute window end as a naive datetime then extract time
-            start_dt = now.replace(
-                hour=window_start.hour,
-                minute=window_start.minute,
-                second=0,
-                microsecond=0,
-            )
+            start_dt = _sniper_start_dt(now, start_str)
             end_dt = start_dt + duration
-            window_end = end_dt.time()
-
-            if window_start <= t <= window_end:
+            if parse_time(start_str) <= t <= end_dt.time():
                 return end_dt.strftime("%H:%M")
 
         return None
@@ -419,13 +407,7 @@ class TockMonitor:
             return None
 
         for start_str in self.config.sniper_times:
-            window_start = _parse_time(start_str)
-            start_dt = now.replace(
-                hour=window_start.hour,
-                minute=window_start.minute,
-                second=0,
-                microsecond=0,
-            )
+            start_dt = _sniper_start_dt(now, start_str)
             delta_sec = (start_dt - now).total_seconds()
             if 0 < delta_sec <= PREWARM_BEFORE_MIN * 60:
                 return f"{day_name}@{start_str}"
@@ -433,7 +415,7 @@ class TockMonitor:
         return None
 
 
-def _parse_time(s: str) -> time:
-    """Parse 'HH:MM' into datetime.time."""
-    h, m = map(int, s.split(":"))
-    return time(h, m)
+def _sniper_start_dt(now: datetime, start_str: str) -> datetime:
+    """Return the sniper window start as a datetime in the same tz as *now*."""
+    t = parse_time(start_str)
+    return now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)

@@ -178,17 +178,7 @@ async def _test_booking_flow(browser, config, test_slug: str, logger) -> None:
         await page.wait_for_timeout(800)
 
         # Fill CVC if configured — search main frame AND all iframes (Stripe embeds in iframe)
-        cvc_sel_str = sel.get("cvc_input")
-        all_frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
-        cvc_el = None
-        for _frame in all_frames:
-            try:
-                cvc_el = await _frame.query_selector(cvc_sel_str)
-                if cvc_el:
-                    break
-            except Exception:
-                continue
-
+        cvc_el = await browser.find_in_frames(page, sel.get("cvc_input"))
         if cvc_el and config.card_cvc:
             await cvc_el.fill(config.card_cvc)
             logger.info("[test-flow] CVC field found and filled.")
@@ -196,25 +186,13 @@ async def _test_booking_flow(browser, config, test_slug: str, logger) -> None:
             logger.warning("[test-flow] CVC field visible but TOCK_CARD_CVC not set — leaving blank.")
 
         # ── Step 4: Detect card / CVC field / confirm button ───────────
-        # Search across main frame + iframes for each indicator
-        async def _find_in_any_frame(selector: str) -> bool:
-            for _f in all_frames:
-                try:
-                    el = await _f.query_selector(selector)
-                    if el:
-                        return True
-                except Exception:
-                    continue
-            return False
-
         saved_card_sel = sel.get("saved_payment_card")
         no_payment_sel = sel.get("no_payment_indicator")
         confirm_sel    = sel.get("confirm_button")
-        cvc_sel        = sel.get("cvc_input")
 
-        has_card    = await _find_in_any_frame(saved_card_sel)
-        needs_add   = await _find_in_any_frame(no_payment_sel)
-        has_confirm = await _find_in_any_frame(confirm_sel)
+        has_card    = await browser.find_in_frames(page, saved_card_sel) is not None
+        needs_add   = await browser.find_in_frames(page, no_payment_sel) is not None
+        has_confirm = await browser.find_in_frames(page, confirm_sel) is not None
         has_cvc     = cvc_el is not None
         cvc_configured = bool(config.card_cvc)
 
@@ -439,7 +417,7 @@ async def _test_sniper_robustness(
     await browser.warm_session()
     elapsed = _time.monotonic() - t0
 
-    cookies = await browser._context.cookies()
+    cookies = await browser.get_cookies()
     cf = next((c for c in cookies if c["name"] == "cf_clearance"), None)
 
     logger.info(f"[test-sniper] warm_session() completed in {elapsed:.1f}s")

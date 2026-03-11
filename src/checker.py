@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 from playwright.async_api import Page
 
 import src.selectors as sel
-from src.config import Config
+from src.config import Config, parse_time
 from src.tracker import SlotTracker
 
 logger = logging.getLogger(__name__)
@@ -416,8 +416,8 @@ class AvailabilityChecker:
     ) -> list[AvailableSlot]:
         """Sort slots by absolute distance from config.preferred_time (closest first)."""
         try:
-            h, m = map(int, self.config.preferred_time.split(":"))
-            pref_minutes = h * 60 + m
+            pt = parse_time(self.config.preferred_time)
+            pref_minutes = pt.hour * 60 + pt.minute
         except Exception:
             return slots
 
