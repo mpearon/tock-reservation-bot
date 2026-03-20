@@ -143,3 +143,21 @@ Priority order (highest first):
 - First run: use `HEADLESS=false` to manually solve any CAPTCHA, then switch to `HEADLESS=true`
 - Session cookies (especially `cf_clearance`) persist across runs via `session_cookies.json`
 - If the bot starts failing calendar loads in sniper mode, the adaptive logic will switch to sequential automatically; if it fails completely, delete `session_cookies.json` and re-run headed to re-authenticate
+
+## MANDATORY: Test-Driven Development (TDD)
+
+For ALL new code in this project:
+
+1. Write tests FIRST — including edge cases and real API data formats
+2. Run tests — verify they FAIL (red)
+3. Write implementation code
+4. Run tests — verify they PASS (green)
+5. Only then commit
+
+Tests must include:
+- Happy path
+- Edge cases (empty data, null fields, boundary values)
+- Real response formats (not mocked/assumed schemas)
+- Error recovery (what happens after a failure?)
+
+NEVER write implementation before tests exist and fail.

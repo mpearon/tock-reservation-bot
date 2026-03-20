@@ -1092,8 +1092,41 @@ async def main() -> None:
             await monitor.poll()
             return
 
-        # ── Mode: continuous loop ─────────────────────────────────────
-        await monitor.run()
+        # ── Mode: continuous loop (with auto-restart) ─────────────────
+        max_backoff = 300  # cap at 5 minutes
+        backoff = 10       # start at 10 seconds
+        while True:
+            try:
+                await monitor.run()
+                break  # clean exit (shouldn't happen, run() loops forever)
+            except KeyboardInterrupt:
+                raise  # let outer handler deal with it
+            except Exception as e:
+                logger.error(f"Bot crashed: {e}")
+                notifier.error(
+                    "Bot crashed — auto-restarting",
+                    f"{type(e).__name__}: {e}\nRestarting in {backoff}s…",
+                )
+                logger.info(f"Auto-restarting in {backoff}s…")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
+                # Tear down and reinitialize browser
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                browser = TockBrowser(config)
+                await browser.start()
+                checker = AvailabilityChecker(config, browser, tracker)
+
+                if not await browser.login():
+                    logger.error("Login failed on restart — will retry after backoff.")
+                    continue
+
+                monitor = TockMonitor(config, browser, checker, notifier, tracker)
+                logger.info("Bot restarted successfully.")
+                backoff = 10  # reset backoff on successful restart
 
     except KeyboardInterrupt:
         logger.info("\nBot stopped by user (Ctrl+C).")

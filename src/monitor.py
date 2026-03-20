@@ -29,7 +29,7 @@ All times are evaluated in America/Los_Angeles (PT/PDT automatically).
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 import pytz
 
@@ -48,6 +48,12 @@ PT = pytz.timezone("America/Los_Angeles")
 # Must be >= the longest non-sniper poll interval (15 min default) to guarantee
 # the pre-warm fires at the poll just before the window opens.
 PREWARM_BEFORE_MIN = 15
+
+# If a sniper window opens within this many seconds, skip the regular poll and
+# wait so the first sniper poll fires right at the window start.  A full scan
+# takes ~100-120s, so holding when we're within 120s prevents a slow regular
+# poll from burning through the critical first seconds of the window.
+_SNIPER_HOLD_SEC = 120
 
 
 class TockMonitor:
@@ -178,10 +184,6 @@ class TockMonitor:
             "Press Ctrl+C to stop."
         )
         while True:
-            # Determine interval BEFORE poll so it's logged up front
-            interval = self._get_poll_interval()
-            was_sniper = self._sniper_active
-
             # Pre-warm session BEFORE the window opens (not at window entry).
             # Fires when we're within PREWARM_BEFORE_MIN minutes of the next
             # sniper window — giving time to solve CAPTCHA in headed mode.
@@ -194,8 +196,29 @@ class TockMonitor:
                 await self.browser.warm_session()
                 self._session_prewarmed_for = prewarm_target
 
+            # If a sniper window is about to open (within SNIPER_HOLD_SEC),
+            # do NOT start a slow regular poll that would burn through the
+            # first minutes of the window. Instead, wait and fire the first
+            # sniper poll right when the window opens.
+            secs_to_sniper = self._seconds_until_next_sniper()
+            if secs_to_sniper is not None and 0 < secs_to_sniper <= _SNIPER_HOLD_SEC:
+                logger.info(
+                    f"[monitor] Sniper window in {secs_to_sniper}s — "
+                    f"holding for window (skipping regular poll)"
+                )
+                await asyncio.sleep(secs_to_sniper)
+                continue  # re-enter loop; _get_poll_interval will now see sniper mode
+
+            interval = self._get_poll_interval()
+            was_sniper = self._sniper_active
+
             self.notifier.poll_start(self._poll_count + 1, interval)
             await self.poll()
+
+            # Re-check interval AFTER the poll — the poll may have taken long
+            # enough that we've entered (or left) a sniper window since the
+            # pre-poll check.
+            interval = self._get_poll_interval()
 
             # If sniper mode just ended (we left the window), log it and
             # close the reused search pages held open during sniper.
@@ -207,8 +230,17 @@ class TockMonitor:
                 self._session_prewarmed_for = None
 
             if interval > 0:
-                logger.info(f"Sleeping {interval}s…")
-                await asyncio.sleep(interval)
+                # Cap sleep so the bot wakes exactly when a sniper window opens
+                secs_to_sniper = self._seconds_until_next_sniper()
+                if secs_to_sniper is not None and secs_to_sniper < interval:
+                    logger.info(
+                        f"Sleeping {secs_to_sniper}s (sniper window in {secs_to_sniper}s, "
+                        f"not the full {interval}s)"
+                    )
+                    await asyncio.sleep(secs_to_sniper)
+                else:
+                    logger.info(f"Sleeping {interval}s…")
+                    await asyncio.sleep(interval)
                 # Re-check release page periodically between polls (not during sniper)
                 await self._refresh_release_schedule()
             else:
@@ -393,6 +425,26 @@ class TockMonitor:
                 return end_dt.strftime("%H:%M")
 
         return None
+
+    def _seconds_until_next_sniper(self) -> int | None:
+        """
+        Return seconds until the next sniper window starts today, or None
+        if no future window exists today.  Used to cap sleep duration so the
+        bot wakes up exactly when the window opens.
+        """
+        now = datetime.now(PT)
+        day_name = now.strftime("%A")
+        if day_name not in self.config.sniper_days:
+            return None
+
+        best = None
+        for start_str in self.config.sniper_times:
+            start_dt = _sniper_start_dt(now, start_str)
+            delta = (start_dt - now).total_seconds()
+            if delta > 0 and (best is None or delta < best):
+                best = delta
+
+        return int(best) if best is not None else None
 
     def _get_prewarm_target(self) -> str | None:
         """
