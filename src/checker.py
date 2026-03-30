@@ -405,8 +405,13 @@ class AvailabilityChecker:
         return False
 
     async def _click_day(self, page: Page, target_date: date) -> bool:
-        """Click the calendar button for target_date. Returns True on success."""
-        key = "available_day_button"
+        """Click the calendar button for target_date. Returns True on success.
+
+        Uses all_day_button (any in-month day) — NOT available_day_button —
+        so we click days even when they lack the is-available class (e.g.
+        Fuhuihua shows is-sold/is-disabled until the exact release moment).
+        """
+        key = "all_day_button"
         selector = sel.get(key)
         target_num = str(target_date.day)
 
