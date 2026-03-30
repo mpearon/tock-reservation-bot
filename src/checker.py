@@ -255,69 +255,56 @@ class AvailabilityChecker:
                 except Exception as e:
                     logger.debug(f"[check] Screenshot failed: {e}")
 
-            # STRATEGY: Check two independent signals for available slots.
+            # STRATEGY: Click the target day by number, then find slot buttons
+            # using the same multi-selector fallback as --test-booking-flow.
             #
-            # Signal 1: The URL ?date= param pre-selects the date, so Tock may
-            #   already show time slot results in the results area (below the
-            #   calendar) WITHOUT needing a calendar click. Check these first.
-            #
-            # Signal 2: The calendar marks days with `is-available` class.
-            #   Click the day to load its slots if Signal 1 found nothing.
+            # The Tock UI varies by restaurant — some use is-available class on
+            # calendar days, others don't. Slot buttons may be Consumer-resultsListItem
+            # or plain "Book" buttons with hashed CSS classes. We try all known
+            # patterns and use the first that matches.
 
-            # --- Signal 1: Check for pre-loaded time slot results ---
-            try:
-                await page.wait_for_selector(
-                    sel.get("available_slot_button"), timeout=3000
-                )
-            except Exception:
-                pass  # no pre-loaded results; will try calendar click path
-
-            preloaded_slots = await self._collect_slots(page, target_date)
-            if preloaded_slots:
-                logger.info(
-                    f"[check] {date_str} — {len(preloaded_slots)} slot(s) found "
-                    f"via pre-loaded results (no calendar click needed)"
-                )
-                for slot in preloaded_slots:
-                    self.tracker.record(slot.slot_date, slot.slot_time)
-                return self._sort_by_preferred_time(preloaded_slots)
-
-            # --- Signal 2: Click day by number, then check for slots ---
-            # Skip the is-available class gate entirely — Tock's modal calendar
-            # doesn't reliably use it. Instead, click the target day by number
-            # and check if slots or a "Book now" button appear.
+            # Click the target day in the calendar
             clicked = await self._click_day(page, target_date)
             if not clicked:
                 logger.info(f"[check] {date_str} — could not click day in calendar")
                 return []
 
-            # After clicking the day, wait for slot buttons
-            try:
-                await page.wait_for_selector(
-                    sel.get("available_slot_button"), timeout=3000
-                )
-            except Exception:
-                pass  # no slot buttons; check for Book Now path
+            # Wait for the slot panel to render after clicking the day
+            # (Tock needs time to load the slot results via React)
+            await page.wait_for_timeout(2500)
 
-            slots = await self._collect_slots(page, target_date)
+            # Try multiple selectors for slot/booking buttons (same order as
+            # --test-booking-flow). The first selector that matches wins.
+            slot_selectors = [
+                sel.get("available_slot_button"),          # button.Consumer-resultsListItem.is-available
+                "button.Consumer-resultsListItem",         # without is-available class
+                'button:visible:has-text("Book")',         # "Book" CTA (e.g. Benu css-dr2rn7)
+                sel.get("book_now_button"),                # "Book now" button
+                "button.SearchExperience-bookButton",      # alternative booking button
+                "[data-testid='book-button']",             # test ID variant
+            ]
 
-            # If no direct slot results, check for "Book now" button
-            if not slots:
+            found_selector = None
+            slot_count = 0
+            for try_sel in slot_selectors:
                 try:
-                    book_now = await page.query_selector(sel.get("book_now_button"))
-                    if book_now:
-                        logger.info(f"[check] {date_str} — 'Book now' button found, clicking")
-                        await book_now.click()
-                        # Wait for the booking/slot selection page to load
-                        try:
-                            await page.wait_for_selector(
-                                sel.get("available_slot_button"), timeout=5000
-                            )
-                        except Exception:
-                            pass
-                        slots = await self._collect_slots(page, target_date)
-                except Exception as e:
-                    logger.debug(f"[check] {date_str} — Book Now check failed: {e}")
+                    count = await page.locator(try_sel).count()
+                    if count > 0:
+                        found_selector = try_sel
+                        slot_count = count
+                        logger.info(
+                            f"[check] {date_str} — {count} slot(s) found via {try_sel!r}"
+                        )
+                        break
+                except Exception:
+                    continue
+
+            if not found_selector:
+                logger.debug(f"[check] {date_str} — no slots found with any selector")
+                return []
+
+            # Collect slots from the matched selector
+            slots = await self._collect_slots_multi(page, target_date, found_selector)
 
             # Record each new slot in the tracker
             for slot in slots:
@@ -446,19 +433,14 @@ class AvailabilityChecker:
     async def _collect_slots(
         self, page: Page, target_date: date
     ) -> list[AvailableSlot]:
-        """Scrape all visible available time slots after a day is clicked."""
-        slot_key = "available_slot_button"
-        slot_selector = sel.get(slot_key)
-        time_key = "slot_time_text"
-        time_selector = sel.get(time_key)
+        """Scrape all visible available time slots after a day is clicked.
+        Uses the legacy Consumer-resultsListItem selector."""
+        slot_selector = sel.get("available_slot_button")
+        time_selector = sel.get("slot_time_text")
 
         try:
             slot_buttons = await page.query_selector_all(slot_selector)
-        except Exception as e:
-            logger.error(
-                f"SELECTOR_FAILED: key='{slot_key}'  selector={slot_selector!r}\n"
-                f"  → Update src/selectors.py  Error: {e}"
-            )
+        except Exception:
             return []
 
         slots: list[AvailableSlot] = []
@@ -477,17 +459,73 @@ class AvailabilityChecker:
                         )
             except Exception:
                 continue
+        return slots
 
-        if not slots:
-            logger.debug(
-                f"[check] {target_date.isoformat()} — day available but no time slots "
-                f"found (SELECTOR_FAILED: key='{slot_key}'  selector={slot_selector!r})"
+    async def _collect_slots_multi(
+        self, page: Page, target_date: date, matched_selector: str
+    ) -> list[AvailableSlot]:
+        """Collect slots using whichever selector matched during detection.
+
+        For Consumer-resultsListItem selectors, extracts time from a child span.
+        For "Book" button selectors, extracts context from surrounding elements
+        or falls back to a generic slot label.
+        """
+        import re
+
+        slots: list[AvailableSlot] = []
+        try:
+            locator = page.locator(matched_selector)
+            count = await locator.count()
+
+            for i in range(count):
+                el = locator.nth(i)
+                try:
+                    # Try to get time text from various sources
+                    time_text = None
+
+                    # Source 1: Child span with time class (legacy Tock)
+                    time_selector = sel.get("slot_time_text")
+                    time_span = el.locator(time_selector)
+                    if await time_span.count() > 0:
+                        time_text = (await time_span.first.text_content() or "").strip()
+
+                    # Source 2: Look for time pattern in nearby text (parent/sibling)
+                    if not time_text:
+                        # Get the parent container's text for time context
+                        parent = el.locator("..")
+                        parent_text = (await parent.text_content() or "").strip()
+                        # Match common time patterns: "5:00 PM", "8:00 PM", "17:00"
+                        time_match = re.search(
+                            r'\b(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))\b', parent_text
+                        )
+                        if time_match:
+                            time_text = time_match.group(1)
+
+                    # Source 3: Fall back to button text or slot number
+                    if not time_text:
+                        btn_text = (await el.text_content() or "").strip()
+                        if btn_text and btn_text.lower() not in ("book", "book now"):
+                            time_text = btn_text
+                        else:
+                            time_text = f"Slot {i + 1}"
+
+                    slots.append(
+                        AvailableSlot(
+                            slot_date=target_date,
+                            slot_time=time_text,
+                            day_of_week=target_date.strftime("%A"),
+                        )
+                    )
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.error(f"[check] {target_date.isoformat()} — slot collection failed: {e}")
+
+        if slots:
+            logger.info(
+                f"[check] {target_date.isoformat()} — {len(slots)} slot(s): "
+                + ", ".join(s.slot_time for s in slots)
             )
-
-        logger.debug(
-            f"[check] {target_date.isoformat()} — {len(slots)} time slot(s): "
-            + ", ".join(s.slot_time for s in slots)
-        )
         return slots
 
     def _sort_by_preferred_time(
