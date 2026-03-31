@@ -67,6 +67,9 @@ class AvailabilityChecker:
         # opening fresh — faster (no DNS/TCP overhead) and looks more human.
         self._sniper_pages: dict[str, "Page"] = {}  # date_str -> open Page
         self._screenshot_taken_this_poll = False  # reset each poll cycle
+        # Dates that failed to show the target day in the calendar.
+        # Cleared when sniper pages are closed (new window).
+        self._skip_dates: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public
@@ -80,6 +83,7 @@ class AvailabilityChecker:
             except Exception:
                 pass
         self._sniper_pages.clear()
+        self._skip_dates.clear()
         logger.debug("[check] Sniper pages closed.")
 
     async def check_all(self, concurrent: bool = False, keep_pages: bool = False) -> list[AvailableSlot]:
@@ -214,6 +218,14 @@ class AvailabilityChecker:
         (reload instead of full navigate) for speed and Cloudflare friendliness.
         """
         date_str = target_date.isoformat()
+
+        # Skip dates that already failed (day not in calendar — beyond booking window).
+        # Only skip during sniper mode (keep_page=True) to avoid wasting poll time.
+        # Cache is cleared when sniper pages close (new window = new release possible).
+        if keep_page and date_str in self._skip_dates:
+            logger.debug(f"[check] {date_str} — skipped (not in calendar last poll)")
+            return []
+
         url = (
             f"{BASE_URL}/{self.config.restaurant_slug}/search"
             f"?date={date_str}"
@@ -240,8 +252,9 @@ class AvailabilityChecker:
                 logger.debug(f"[check] {date_str} → {url}")
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-            # Wait for calendar to render
-            if not await self._wait_for_calendar(page, date_str):
+            # Wait for calendar to render (shorter timeout in sniper mode)
+            cal_timeout = 5000 if keep_page else 15000
+            if not await self._wait_for_calendar(page, date_str, timeout=cal_timeout):
                 return []
 
             # Debug screenshot: capture once per poll cycle (first date only)
@@ -267,11 +280,14 @@ class AvailabilityChecker:
             clicked = await self._click_day(page, target_date)
             if not clicked:
                 logger.info(f"[check] {date_str} — could not click day in calendar")
+                if keep_page:
+                    self._skip_dates.add(date_str)
                 return []
 
-            # Wait for the slot panel to render after clicking the day
-            # (Tock needs time to load the slot results via React)
-            await page.wait_for_timeout(2500)
+            # Wait for the slot panel to render after clicking the day.
+            # Shorter wait in sniper mode (page is warm, React state cached).
+            slot_wait = 500 if keep_page else 2500
+            await page.wait_for_timeout(slot_wait)
 
             # Try multiple selectors for slot/booking buttons (same order as
             # --test-booking-flow). The first selector that matches wins.
@@ -327,12 +343,12 @@ class AvailabilityChecker:
             if not keep_page:
                 await page.close()
 
-    async def _wait_for_calendar(self, page: Page, date_str: str) -> bool:
+    async def _wait_for_calendar(self, page: Page, date_str: str, timeout: int = 15000) -> bool:
         """Wait for the calendar container to appear. Logs selector failures."""
         key = "calendar_container"
         selector = sel.get(key)
         try:
-            await page.wait_for_selector(selector, timeout=15000)
+            await page.wait_for_selector(selector, timeout=timeout)
             return True
         except Exception as e:
             logger.error(
@@ -411,48 +427,24 @@ class AvailabilityChecker:
         so we click days even when they lack the is-available class (e.g.
         Fuhuihua shows is-sold/is-disabled until the exact release moment).
 
-        If the target day isn't visible, paginates the calendar forward
-        (clicks the > arrow) up to 2 times before giving up.
+        No pagination — if the day isn't in the visible calendar, it's
+        beyond the booking window and we skip it instantly.
         """
         selector = sel.get("all_day_button")
         target_num = str(target_date.day)
 
-        # Try to find and click the day, paginating forward if needed
-        for attempt in range(3):  # initial view + 2 pagination attempts
-            day_buttons = await page.query_selector_all(selector)
-            for btn in day_buttons:
-                try:
-                    text = (await btn.text_content() or "").strip()
-                    if text == target_num:
-                        await btn.click()
-                        logger.info(
-                            f"[check] Clicked day {target_num} for {target_date.isoformat()}"
-                        )
-                        return True
-                except Exception:
-                    continue
-
-            # Day not found — try paginating the calendar forward
-            if attempt < 2:
-                try:
-                    # The calendar has < > arrows near the month heading
-                    next_btn = await page.query_selector(
-                        'button[aria-label="Next"], '
-                        'button[aria-label="next"], '
-                        'button.ConsumerCalendar-nextMonth, '
-                        'button.ConsumerCalendar-arrow--next, '
-                        '[class*="Calendar"] button:has-text(">")'
+        day_buttons = await page.query_selector_all(selector)
+        for btn in day_buttons:
+            try:
+                text = (await btn.text_content() or "").strip()
+                if text == target_num:
+                    await btn.click()
+                    logger.info(
+                        f"[check] Clicked day {target_num} for {target_date.isoformat()}"
                     )
-                    if next_btn:
-                        await next_btn.click()
-                        await page.wait_for_timeout(1000)
-                        logger.debug(
-                            f"[check] Paginated calendar forward (attempt {attempt + 1})"
-                        )
-                        continue
-                except Exception:
-                    pass
-                break  # no next button found, stop trying
+                    return True
+            except Exception:
+                continue
 
         logger.info(
             f"[check] Day {target_num} not visible in calendar for "
