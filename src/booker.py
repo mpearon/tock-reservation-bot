@@ -127,14 +127,13 @@ class TockBooker:
             ):
                 return False
 
-            # Wait for day buttons to render inside the calendar dropdown.
-            # Use wait_for_selector so we move on as soon as they're ready.
+            # Wait for day buttons to render inside the calendar.
             try:
                 await page.wait_for_selector(
-                    sel.get("available_day_button"), timeout=5000
+                    sel.get("all_day_button"), timeout=5000
                 )
             except Exception:
-                pass  # day may not have is-available class yet; proceed anyway
+                pass  # calendar may still be loading; proceed anyway
 
             # ── Step 2: click the calendar day ────────────────────────
             if booking_won.is_set():
@@ -197,20 +196,25 @@ class TockBooker:
     # ------------------------------------------------------------------
 
     async def _click_calendar_day(self, page: Page, slot: AvailableSlot) -> bool:
-        """Click the calendar button matching slot.slot_date."""
-        key = "available_day_button"
+        """Click the calendar button matching slot.slot_date.
+
+        Uses all_day_button (any in-month day) — NOT available_day_button —
+        so we click days even when they lack the is-available class (e.g.
+        Fuhuihua shows is-sold/is-disabled until the exact release moment).
+        """
+        key = "all_day_button"
         selector = sel.get(key)
         target_num = str(slot.slot_date.day)
 
         day_buttons = await page.query_selector_all(selector)
         for btn in day_buttons:
             try:
-                # Button text content IS the day number directly.
-                # (Old code looked for child span.B2; now span.MuiTypography-root.
-                # Reading btn.text_content() is span-class-agnostic and more robust.)
                 text = (await btn.text_content() or "").strip()
                 if text == target_num:
                     await btn.click()
+                    logger.info(
+                        f"[book] Clicked day {target_num} for {slot.slot_date_str}"
+                    )
                     return True
             except Exception:
                 continue
@@ -223,58 +227,56 @@ class TockBooker:
         return False
 
     async def _click_time_slot(self, page: Page, slot: AvailableSlot) -> bool:
-        """Find the time slot closest to slot.slot_time and click it."""
-        slot_key = "available_slot_button"
-        time_key = "slot_time_text"
-        slot_selector = sel.get(slot_key)
-        time_selector = sel.get(time_key)
+        """Find the time slot closest to slot.slot_time and click it.
 
-        try:
-            await page.wait_for_selector(slot_selector, timeout=10000)
-        except Exception as e:
-            logger.error(
-                f"SELECTOR_FAILED: key='{slot_key}'  selector={slot_selector!r}\n"
-                f"  No time slots appeared after clicking the day.\n"
-                f"  → Update src/selectors.py  Error: {e}"
-            )
-            return False
+        Uses the same multi-selector fallback as checker.py so both modules
+        handle all Tock UI variants identically.
+        """
+        slot_selectors = [
+            sel.get("available_slot_button"),          # button.Consumer-resultsListItem.is-available
+            "button.Consumer-resultsListItem",         # without is-available class
+            'button:visible:has-text("Book")',         # "Book" CTA (e.g. Benu css-dr2rn7)
+            sel.get("book_now_button"),                # "Book now" button
+            "button.SearchExperience-bookButton",      # alternative booking button
+            "[data-testid='book-button']",             # test ID variant
+        ]
 
-        slot_buttons = await page.query_selector_all(slot_selector)
+        # Wait briefly for slot buttons to appear after the day click
+        await page.wait_for_timeout(1000)
 
-        # Try exact match first
-        for btn in slot_buttons:
+        # Try each selector until one finds buttons
+        matched_selector = None
+        for try_sel in slot_selectors:
             try:
-                span = await btn.query_selector(time_selector)
-                if span:
-                    text = (await span.text_content() or "").strip()
-                    if text.upper() == slot.slot_time.upper():
-                        await btn.click()
-                        logger.info(f"[book] Clicked time slot: {slot.slot_time}")
-                        return True
+                count = await page.locator(try_sel).count()
+                if count > 0:
+                    matched_selector = try_sel
+                    logger.debug(
+                        f"[book] Found {count} slot button(s) via {try_sel!r}"
+                    )
+                    break
             except Exception:
                 continue
 
-        # Fallback: click the first available slot (checker already picked closest)
-        if slot_buttons:
-            try:
-                first_span = await slot_buttons[0].query_selector(time_selector)
-                actual_time = ""
-                if first_span:
-                    actual_time = (await first_span.text_content() or "").strip()
-                logger.warning(
-                    f"[book] Exact time '{slot.slot_time}' not found on page; "
-                    f"clicking first available slot ({actual_time or 'unknown time'})."
-                )
-                await slot_buttons[0].click()
-                return True
-            except Exception as e:
-                logger.error(f"[book] Could not click first slot: {e}")
+        if not matched_selector:
+            logger.error(
+                "[book] No slot buttons found after clicking the day.\n"
+                "  Tried all known selectors.\n"
+                "  → Update src/selectors.py or src/booker.py slot_selectors"
+            )
+            return False
 
-        logger.error(
-            f"SELECTOR_FAILED: key='{slot_key}'  No slots found after day click.\n"
-            f"  → Update src/selectors.py"
-        )
-        return False
+        # Click the first matching button (checker already picked the best slot
+        # per date, and we navigated to that date's page)
+        try:
+            locator = page.locator(matched_selector)
+            btn_text = (await locator.first.text_content() or "").strip()
+            await locator.first.click()
+            logger.info(f"[book] Clicked slot button: {btn_text or matched_selector}")
+            return True
+        except Exception as e:
+            logger.error(f"[book] Could not click slot button: {e}")
+            return False
 
     async def _wait_for_checkout(self, page: Page, slot: AvailableSlot) -> bool:
         """Return True when the checkout/booking-details page is detected."""

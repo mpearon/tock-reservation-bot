@@ -204,7 +204,7 @@ class TockMonitor:
             secs_to_sniper = self._seconds_until_next_sniper()
             if secs_to_sniper is not None and 0 < secs_to_sniper <= _SNIPER_HOLD_SEC:
                 logger.info(
-                    f"[monitor] Sniper window in {secs_to_sniper}s — "
+                    f"[monitor] Sniper window in {secs_to_sniper:.1f}s — "
                     f"holding for window (skipping regular poll)"
                 )
                 await asyncio.sleep(secs_to_sniper)
@@ -235,8 +235,8 @@ class TockMonitor:
                 secs_to_sniper = self._seconds_until_next_sniper()
                 if secs_to_sniper is not None and secs_to_sniper < interval:
                     logger.info(
-                        f"Sleeping {secs_to_sniper}s (sniper window in {secs_to_sniper}s, "
-                        f"not the full {interval}s)"
+                        f"Sleeping {secs_to_sniper:.1f}s (sniper window in "
+                        f"{secs_to_sniper:.1f}s, not the full {interval}s)"
                     )
                     await asyncio.sleep(secs_to_sniper)
                 else:
@@ -432,11 +432,11 @@ class TockMonitor:
 
         return None
 
-    def _seconds_until_next_sniper(self) -> int | None:
+    def _seconds_until_next_sniper(self) -> float | None:
         """
         Return seconds until the next sniper window starts today, or None
         if no future window exists today.  Used to cap sleep duration so the
-        bot wakes up exactly when the window opens.
+        bot wakes at the exact moment the window opens (sub-second precision).
         """
         now = datetime.now(PT)
         day_name = now.strftime("%A")
@@ -450,7 +450,7 @@ class TockMonitor:
             if delta > 0 and (best is None or delta < best):
                 best = delta
 
-        return int(best) if best is not None else None
+        return best
 
     def _get_prewarm_target(self) -> str | None:
         """

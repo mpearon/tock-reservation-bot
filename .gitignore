@@ -30,6 +30,9 @@ ENV/
 # === Secrets — NEVER COMMIT ===
 .env
 
+# === Launch scripts with tokens ===
+start-claude.sh
+
 # === Bot runtime state (local only) ===
 session_cookies.json
 slot_tracker.json
