@@ -40,6 +40,14 @@ slot_tracker.csv
 bot.log
 debug_screenshots/
 
+# === Debug artifacts (authenticated page captures) ===
+page_debug*.png
+test_booking_flow.png
+find_selectors.py
+
+# === Local Claude Code config (machine-specific) ===
+.claude/
+
 # === Playwright ===
 playwright-report/
 test-results/
