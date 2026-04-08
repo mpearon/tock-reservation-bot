@@ -2,7 +2,7 @@
 
 Automated reservation sniper for restaurants on [Tock](https://www.exploretock.com). Monitors for available slots, fires a high-speed sniper mode around known release times, books the first available slot, and notifies you via Discord.
 
-Built for [Fuhuihua SF](https://www.exploretock.com/fui-hui-hua-san-francisco) but works with any Tock restaurant — just change `RESTAURANT_SLUG` in `.env`.
+Built for [Fuhuihua SF](https://www.exploretock.com/fui-hui-hua-san-francisco) but works with any Tock restaurant — just change `RESTAURANT_SLUG` in `.env`. For a detailed write-up covering architecture, development timeline, bugs found and fixed, and lessons learned, see the [Project Report](https://charlieyang1557.github.io/tock-reservation-bot/report.html).
 
 ## Features
 
@@ -198,10 +198,6 @@ Output shows which selectors pass and which need updating. Fix them in `src/sele
 | Sniper not activating | `SNIPER_DAYS` must be full names (`Wednesday` not `Wed`) |
 | Cloudflare challenge | Run headed once, solve manually — clearance cookie is saved |
 | Selectors broken after Tock update | Run `--verify`, inspect elements in DevTools, update `src/selectors.py` |
-
-## Project Report
-
-See the [Project Report](https://charlieyang1557.github.io/tock-reservation-bot/report.html) for a detailed write-up covering architecture, development timeline, bugs found and fixed, and lessons learned.
 
 ## Disclaimer
 
