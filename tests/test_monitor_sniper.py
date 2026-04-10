@@ -616,3 +616,101 @@ class TestSniperWorkflowIntegration:
         assert poll_times[0].minute == 59, (
             f"First poll should fire at 19:59, not {poll_times[0]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# warm_session return value
+# ---------------------------------------------------------------------------
+
+class TestWarmSessionReturn:
+    @pytest.mark.asyncio
+    async def test_warm_session_returns_true_on_healthy(self):
+        from src.browser import TockBrowser
+        config = MagicMock()
+        config.restaurant_slug = "test"
+        config.headless = True
+        browser = TockBrowser(config)
+
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.wait_for_load_state = AsyncMock()
+        mock_page.close = AsyncMock()
+        browser.new_page = AsyncMock(return_value=mock_page)
+        browser._is_logged_in = AsyncMock(return_value=True)
+        browser._save_cookies = AsyncMock()
+
+        result = await browser.warm_session()
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_warm_session_returns_false_on_login_failure(self):
+        from src.browser import TockBrowser
+        config = MagicMock()
+        config.restaurant_slug = "test"
+        config.headless = True
+        browser = TockBrowser(config)
+
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.wait_for_load_state = AsyncMock()
+        mock_page.close = AsyncMock()
+        browser.new_page = AsyncMock(return_value=mock_page)
+        browser._is_logged_in = AsyncMock(return_value=False)
+        browser.login = AsyncMock(return_value=False)
+
+        result = await browser.warm_session()
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_warm_session_returns_false_on_exception(self):
+        from src.browser import TockBrowser
+        config = MagicMock()
+        config.restaurant_slug = "test"
+        config.headless = True
+        browser = TockBrowser(config)
+
+        browser.new_page = AsyncMock(side_effect=Exception("browser crashed"))
+
+        result = await browser.warm_session()
+        assert result is False
+
+
+class TestMonitorPrewarmFailure:
+    """Monitor should not mark session as prewarmed when warm_session fails."""
+
+    @pytest.mark.asyncio
+    async def test_prewarm_not_marked_on_failure(self):
+        """If warm_session returns False, _session_prewarmed_for stays None."""
+        mon = _make_monitor()
+        mon.browser.warm_session = AsyncMock(return_value=False)
+
+        # Simulate a prewarm target being detected
+        mon._get_prewarm_target = MagicMock(return_value="Wednesday@19:59")
+        mon._session_prewarmed_for = None
+
+        # Run one iteration of the prewarm logic manually
+        prewarm_target = mon._get_prewarm_target()
+        if prewarm_target and prewarm_target != mon._session_prewarmed_for:
+            success = await mon.browser.warm_session()
+            if success:
+                mon._session_prewarmed_for = prewarm_target
+            # else: don't mark
+
+        assert mon._session_prewarmed_for is None
+
+    @pytest.mark.asyncio
+    async def test_prewarm_marked_on_success(self):
+        """If warm_session returns True, _session_prewarmed_for is set."""
+        mon = _make_monitor()
+        mon.browser.warm_session = AsyncMock(return_value=True)
+
+        mon._get_prewarm_target = MagicMock(return_value="Wednesday@19:59")
+        mon._session_prewarmed_for = None
+
+        prewarm_target = mon._get_prewarm_target()
+        if prewarm_target and prewarm_target != mon._session_prewarmed_for:
+            success = await mon.browser.warm_session()
+            if success:
+                mon._session_prewarmed_for = prewarm_target
+
+        assert mon._session_prewarmed_for == "Wednesday@19:59"

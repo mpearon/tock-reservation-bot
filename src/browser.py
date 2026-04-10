@@ -232,7 +232,7 @@ class TockBrowser:
         finally:
             await page.close()
 
-    async def warm_session(self) -> None:
+    async def warm_session(self) -> bool:
         """
         Navigate to the restaurant's main Tock page to refresh Cloudflare
         cookies before the sniper window opens. Also re-logins if the session
@@ -240,10 +240,13 @@ class TockBrowser:
 
         Called once when sniper mode activates so every rapid poll starts
         with a fresh cf_clearance token.
+
+        Returns True on success, False if the session could not be warmed.
         """
         url = f"{BASE_URL}/{self.config.restaurant_slug}"
-        page = await self.new_page()
+        page = None
         try:
+            page = await self.new_page()
             logger.info(f"[warm] Refreshing session: {url}")
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
             # Wait for network to settle (Cloudflare JS runs after domcontentloaded)
@@ -257,16 +260,21 @@ class TockBrowser:
                     "[warm] Session appears expired — re-authenticating before sniper fires."
                 )
                 await page.close()
-                await self.login()
-                return
+                success = await self.login()
+                if not success:
+                    logger.error("[warm] Re-login failed during pre-warm!")
+                return success
 
             await self._save_cookies()
             logger.info("[warm] Session healthy — cookies refreshed and saved.")
+            return True
         except Exception as e:
             logger.warning(f"[warm] Session warm failed (non-critical): {e}")
+            return False
         finally:
             try:
-                await page.close()
+                if page is not None:
+                    await page.close()
             except Exception:
                 pass
 

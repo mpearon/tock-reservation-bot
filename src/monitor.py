@@ -194,8 +194,19 @@ class TockMonitor:
                     f"[monitor] Sniper window within {PREWARM_BEFORE_MIN} min "
                     f"({prewarm_target}) — pre-warming session cookies…"
                 )
-                await self.browser.warm_session()
-                self._session_prewarmed_for = prewarm_target
+                success = await self.browser.warm_session()
+                if success:
+                    self._session_prewarmed_for = prewarm_target
+                else:
+                    logger.error(
+                        f"[monitor] Pre-warm failed for {prewarm_target} — "
+                        "will retry next poll cycle"
+                    )
+                    self.notifier.error(
+                        "Pre-warm failed",
+                        f"Session warm-up for {prewarm_target} failed. "
+                        "Bot will retry but sniper accuracy may be reduced."
+                    )
 
             # If a sniper window is about to open (within SNIPER_HOLD_SEC),
             # do NOT start a slow regular poll that would burn through the
