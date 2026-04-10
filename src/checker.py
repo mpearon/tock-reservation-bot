@@ -388,8 +388,12 @@ class AvailabilityChecker:
             slots = await self._collect_slots_multi(page, target_date, found_selector)
 
             # Record each new slot in the tracker
+            # Sniper mode defers disk I/O; monitor.poll() calls flush_deferred() after
             for slot in slots:
-                self.tracker.record(slot.slot_date, slot.slot_time)
+                if keep_page:
+                    self.tracker.record_deferred(slot.slot_date, slot.slot_time)
+                else:
+                    self.tracker.record(slot.slot_date, slot.slot_time)
 
             return self._sort_by_preferred_time(slots)
 

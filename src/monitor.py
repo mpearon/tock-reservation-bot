@@ -361,6 +361,9 @@ class TockMonitor:
                 "[monitor] All booking attempts failed this cycle. Will retry."
             )
 
+        # Flush any deferred tracker writes (sniper mode defers disk I/O)
+        self.tracker.flush_deferred()
+
     # ------------------------------------------------------------------
     # Scheduling
     # ------------------------------------------------------------------

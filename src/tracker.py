@@ -51,6 +51,44 @@ class SlotTracker:
     # Public API
     # ------------------------------------------------------------------
 
+    def record_deferred(self, slot_date: date, slot_time: str) -> bool:
+        """Record a slot without flushing to disk. Call flush_deferred() later.
+
+        Same dedup logic as record() but skips the save() call.
+        Use during sniper mode to avoid ~50-100ms of blocking disk I/O.
+        """
+        key = f"{slot_date.isoformat()}|{slot_time}"
+
+        if key in self._seen_this_session:
+            return False
+
+        self._seen_this_session.add(key)
+        existing_keys = {f"{e.slot_date}|{e.slot_time}" for e in self._events}
+        is_new = key not in existing_keys
+
+        event = SlotEvent(
+            recorded_at=datetime.now().isoformat(timespec="seconds"),
+            slot_date=slot_date.isoformat(),
+            slot_time=slot_time,
+            day_of_week=slot_date.strftime("%A"),
+            days_ahead=(slot_date - date.today()).days,
+        )
+        self._events.append(event)
+        self._pending_flush = True
+
+        if is_new:
+            logger.info(
+                f"[tracker] NEW slot: {event.slot_date} ({event.day_of_week}) "
+                f"at {event.slot_time} — {event.days_ahead} days ahead"
+            )
+        return is_new
+
+    def flush_deferred(self) -> None:
+        """Flush any pending deferred records to disk."""
+        if getattr(self, '_pending_flush', False):
+            self.save()
+            self._pending_flush = False
+
     def record(self, slot_date: date, slot_time: str) -> bool:
         """
         Record a detected slot.
