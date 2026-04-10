@@ -60,7 +60,8 @@ class TockBooker:
     # ------------------------------------------------------------------
 
     async def book_best_slot_race(
-        self, slots: list[AvailableSlot]
+        self, slots: list[AvailableSlot],
+        warm_pages: dict[str, Page] | None = None,
     ) -> AvailableSlot | None:
         """
         Pick the best slot per calendar date, then attempt all of them
@@ -83,8 +84,9 @@ class TockBooker:
 
         async def attempt(slot: AvailableSlot) -> None:
             self.notifier.booking_attempting(slot)
+            page = warm_pages.get(slot.slot_date_str) if warm_pages else None
             try:
-                success = await self._book_single(slot, booking_won)
+                success = await self._book_single(slot, booking_won, warm_page=page)
                 if success:
                     winner.append(slot)
             except Exception as e:
@@ -100,57 +102,69 @@ class TockBooker:
     # ------------------------------------------------------------------
 
     async def _book_single(
-        self, slot: AvailableSlot, booking_won: asyncio.Event
+        self, slot: AvailableSlot, booking_won: asyncio.Event,
+        warm_page: Page | None = None,
     ) -> bool:
         """
         Full booking flow for one slot on its own Playwright page.
         Returns True if the booking was confirmed.
+
+        If warm_page is provided (sniper mode), skips Steps 1-2 (navigation +
+        day click) and jumps straight to clicking the time slot — saving ~3-5s.
         """
         if self.config.dry_run:
             self.notifier.dry_run_would_book(slot)
             return False
 
-        page = await self.browser.new_page()
+        # Use warm page from checker (sniper mode) or create fresh
+        page = warm_page if warm_page and not warm_page.is_closed() else None
+        owns_page = page is None  # only close pages we created
+        if page is None:
+            page = await self.browser.new_page()
+
         try:
-            # ── Step 1: load search page ──────────────────────────────
-            url = (
-                f"{BASE_URL}/{self.config.restaurant_slug}/search"
-                f"?date={slot.slot_date_str}"
-                f"&size={self.config.party_size}"
-                f"&time={self.config.preferred_time}"
-            )
-            logger.info(f"[book] {slot} → {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-            if not await self._wait_for_selector(
-                page, "calendar_container", context=str(slot), timeout=15000
-            ):
-                return False
-
-            # Wait for day buttons to render inside the calendar.
-            try:
-                await page.wait_for_selector(
-                    sel.get("all_day_button"), timeout=5000
+            if warm_page is None or warm_page.is_closed():
+                # ── Step 1: load search page ──────────────────────────────
+                url = (
+                    f"{BASE_URL}/{self.config.restaurant_slug}/search"
+                    f"?date={slot.slot_date_str}"
+                    f"&size={self.config.party_size}"
+                    f"&time={self.config.preferred_time}"
                 )
-            except Exception:
-                pass  # calendar may still be loading; proceed anyway
+                logger.info(f"[book] {slot} → {url}")
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-            # ── Step 2: click the calendar day ────────────────────────
-            if booking_won.is_set():
-                self.notifier.booking_aborted(slot, "another slot already booked")
-                return False
+                if not await self._wait_for_selector(
+                    page, "calendar_container", context=str(slot), timeout=15000
+                ):
+                    return False
 
-            if not await self._click_calendar_day(page, slot):
-                return False
-
-            # Wait reactively for slot buttons after day click
-            from src.selectors import get_slot_button_selectors
-            for try_sel in get_slot_button_selectors()[:2]:
+                # Wait for day buttons to render inside the calendar.
                 try:
-                    await page.wait_for_selector(try_sel, timeout=2000)
-                    break
+                    await page.wait_for_selector(
+                        sel.get("all_day_button"), timeout=5000
+                    )
                 except Exception:
-                    continue
+                    pass  # calendar may still be loading; proceed anyway
+
+                # ── Step 2: click the calendar day ────────────────────────
+                if booking_won.is_set():
+                    self.notifier.booking_aborted(slot, "another slot already booked")
+                    return False
+
+                if not await self._click_calendar_day(page, slot):
+                    return False
+
+                # Wait reactively for slot buttons after day click
+                from src.selectors import get_slot_button_selectors
+                for try_sel in get_slot_button_selectors()[:2]:
+                    try:
+                        await page.wait_for_selector(try_sel, timeout=2000)
+                        break
+                    except Exception:
+                        continue
+            else:
+                logger.info(f"[book] {slot} → using warm page (skipping navigation)")
 
             # ── Step 3: click the time slot ───────────────────────────
             if booking_won.is_set():
@@ -194,7 +208,9 @@ class TockBooker:
             logger.error(f"[book] Error booking {slot}: {e}")
             return False
         finally:
-            await page.close()
+            if owns_page:
+                await page.close()
+            # Don't close warm pages — checker manages their lifecycle
 
     # ------------------------------------------------------------------
     # Step helpers

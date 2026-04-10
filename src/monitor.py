@@ -349,7 +349,20 @@ class TockMonitor:
             return
 
         # --- Attempt booking ---
-        booked = await self.booker.book_best_slot_race(slots)
+        # Pass warm sniper pages to booker (avoids re-navigation)
+        warm_pages = None
+        if self._sniper_active:
+            warm_pages = {}
+            for s in slots:
+                wp = self.checker.get_warm_page(s.slot_date_str)
+                if wp is not None:
+                    warm_pages[s.slot_date_str] = wp
+            if warm_pages:
+                logger.info(f"[monitor] Passing {len(warm_pages)} warm page(s) to booker")
+            else:
+                warm_pages = None
+
+        booked = await self.booker.book_best_slot_race(slots, warm_pages=warm_pages)
         if booked:
             self._booking_secured = True
             logger.info(

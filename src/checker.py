@@ -86,6 +86,13 @@ class AvailabilityChecker:
             return False
         return date_str in self._skip_dates
 
+    def get_warm_page(self, date_str: str) -> "Page | None":
+        """Return the warm sniper page for a date, or None if unavailable."""
+        page = self._sniper_pages.get(date_str)
+        if page and not page.is_closed():
+            return page
+        return None
+
     async def close_sniper_pages(self) -> None:
         """Close all pages kept open during sniper mode. Call when window ends."""
         for page in list(self._sniper_pages.values()):
