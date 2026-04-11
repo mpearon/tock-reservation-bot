@@ -1,6 +1,7 @@
 """Tests for booking click flow fixes."""
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import date
 
 from src.checker import AvailableSlot
@@ -150,3 +151,77 @@ async def test_checkout_detection_respects_url_change():
     result = await booker._wait_for_checkout(page, slot)
 
     assert result is True
+
+
+@pytest.mark.asyncio
+async def test_screenshot_taken_on_checkout_timeout(tmp_path):
+    """When debug_screenshots=True and checkout times out, a screenshot is saved."""
+    from src.booker import TockBooker
+    from src.config import Config
+    config = Config(
+        tock_email="t@t.com", tock_password="pw", restaurant_slug="test",
+        party_size=2, preferred_days=["Friday"], fallback_days=[],
+        preferred_time="17:00", scan_weeks=4, dry_run=False, headless=True,
+        sniper_days=["Friday"], sniper_times=["19:59"], sniper_duration_min=11,
+        sniper_interval_sec=3, release_window_days=["Monday"],
+        release_window_start="09:00", release_window_end="11:00",
+        debug_screenshots=True,  # enabled
+        discord_webhook_url="", card_cvc="",
+    )
+    browser = MagicMock()
+    notifier = MagicMock()
+    booker = TockBooker(config, browser, notifier)
+
+    page = AsyncMock()
+    page.url = "https://www.exploretock.com/test/search"
+    page.wait_for_selector = AsyncMock(side_effect=Exception("timeout"))
+    page.query_selector = AsyncMock(return_value=None)
+    screenshot_paths = []
+
+    async def mock_screenshot(path=None, **kwargs):
+        if path:
+            screenshot_paths.append(path)
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(b"PNG")
+
+    page.screenshot = AsyncMock(side_effect=mock_screenshot)
+
+    slot = _make_slot()
+    with patch("src.booker._SCREENSHOT_DIR", str(tmp_path)):
+        await booker._wait_for_checkout(page, slot)
+
+    # At least one screenshot should have been taken
+    assert len(screenshot_paths) >= 1
+    assert all("booking_" in p for p in screenshot_paths)
+
+
+@pytest.mark.asyncio
+async def test_no_screenshot_when_debug_disabled(tmp_path):
+    """When debug_screenshots=False, no screenshots during booking."""
+    from src.booker import TockBooker
+    from src.config import Config
+    config = Config(
+        tock_email="t@t.com", tock_password="pw", restaurant_slug="test",
+        party_size=2, preferred_days=["Friday"], fallback_days=[],
+        preferred_time="17:00", scan_weeks=4, dry_run=False, headless=True,
+        sniper_days=["Friday"], sniper_times=["19:59"], sniper_duration_min=11,
+        sniper_interval_sec=3, release_window_days=["Monday"],
+        release_window_start="09:00", release_window_end="11:00",
+        debug_screenshots=False,  # disabled
+        discord_webhook_url="", card_cvc="",
+    )
+    browser = MagicMock()
+    notifier = MagicMock()
+    booker = TockBooker(config, browser, notifier)
+
+    page = AsyncMock()
+    page.url = "https://www.exploretock.com/test/search"
+    page.wait_for_selector = AsyncMock(side_effect=Exception("timeout"))
+    page.query_selector = AsyncMock(return_value=None)
+    page.screenshot = AsyncMock()
+
+    slot = _make_slot()
+    with patch("src.booker._SCREENSHOT_DIR", str(tmp_path)):
+        await booker._wait_for_checkout(page, slot)
+
+    page.screenshot.assert_not_called()

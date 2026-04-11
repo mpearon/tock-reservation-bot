@@ -29,7 +29,9 @@ inside the lock is effectively atomic — no double-bookings can occur.
 
 import asyncio
 import logging
+import os
 import re
+from datetime import datetime as _datetime
 
 from playwright.async_api import Page
 
@@ -43,6 +45,11 @@ from src.selectors import get_slot_button_selectors
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.exploretock.com"
+
+_SCREENSHOT_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "debug_screenshots"
+)
+os.makedirs(_SCREENSHOT_DIR, exist_ok=True)
 
 # Selectors that match generic "Book" buttons (restaurant/experience level, not time-slot).
 # These must only be clicked if surrounding context confirms the target time.
@@ -178,6 +185,8 @@ class TockBooker:
             else:
                 logger.info(f"[book] {slot} → using warm page (skipping navigation)")
 
+            await self._booking_screenshot(page, "01_booking_start")
+
             # ── Step 3: click the time slot ───────────────────────────
             if booking_won.is_set():
                 self.notifier.booking_aborted(slot, "another slot already booked")
@@ -193,12 +202,19 @@ class TockBooker:
             except Exception:
                 pass  # non-critical — proceed regardless
 
+            await self._booking_screenshot(page, "02_after_slot_click")
+
             # ── Step 4: wait for checkout page ────────────────────────
             if booking_won.is_set():
                 self.notifier.booking_aborted(slot, "another slot already booked")
                 return False
 
-            if not await self._wait_for_checkout(page, slot):
+            checkout_ok = await self._wait_for_checkout(page, slot)
+            await self._booking_screenshot(
+                page,
+                "03_checkout_loaded" if checkout_ok else "03_checkout_timeout"
+            )
+            if not checkout_ok:
                 return False
 
             # ── Step 5: confirm (locked — only one task proceeds) ─────
@@ -434,6 +450,7 @@ class TockBooker:
             )
 
         url = page.url
+        await self._booking_screenshot(page, "checkout_timeout_final")
         logger.error(
             f"SELECTOR_FAILED: key='{key}'  selector={selector!r}\n"
             f"  Checkout page not detected after {total_wait}s.\n"
@@ -441,6 +458,18 @@ class TockBooker:
             f"  → Update src/selectors.py"
         )
         return False
+
+    async def _booking_screenshot(self, page: Page, step: str) -> None:
+        """Save a screenshot at *step* during booking (only when debug_screenshots=True)."""
+        if not self.config.debug_screenshots:
+            return
+        try:
+            ts = _datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+            path = os.path.join(_SCREENSHOT_DIR, f"booking_{ts}_{step}.png")
+            await page.screenshot(path=path, full_page=True)
+            logger.info(f"[book] Screenshot saved: {path}")
+        except Exception as e:
+            logger.debug(f"[book] Screenshot failed at step '{step}': {e}")
 
     async def _confirm_booking(self, page: Page, slot: AvailableSlot) -> bool:
         """
