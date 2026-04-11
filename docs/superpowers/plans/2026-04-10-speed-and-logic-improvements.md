@@ -1,6 +1,7 @@
 ---
 render_with_liquid: false
 ---
+{% raw %}
 # Speed & Logic Improvements — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -1641,3 +1642,4 @@ git commit -m "fix: track and drain critical Discord notifications on shutdown"
 | 3: Architecture | A2, F3 | None (code quality) | Low — pure refactor |
 
 **Total estimated sniper cycle: ~4-6s** (down from ~10-12s)
+{% endraw %}
