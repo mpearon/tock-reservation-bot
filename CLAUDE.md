@@ -34,7 +34,20 @@ python main.py --verify
 python main.py --test-notify
 ```
 
-## Test commands
+## Unit tests
+
+```bash
+# Run the full pytest suite
+python -m pytest tests/ -q
+
+# Run a single test file
+python -m pytest tests/test_checker_detection.py -q
+
+# Run a single test by name
+python -m pytest tests/test_checker_detection.py -k "test_name" -q
+```
+
+## Integration test commands
 
 All test modes force `DRY_RUN=true` and never book anything. The default `--test-restaurant` is `benu`.
 
