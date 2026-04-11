@@ -26,6 +26,7 @@ from src.testing.booking_flow import test_booking_flow
 from src.testing.sniper_tests import (
     test_sniper_benchmark,
     test_sniper_integration,
+    test_sniper_phases,
     test_sniper_robustness,
 )
 
@@ -121,6 +122,15 @@ async def main() -> None:
             "Test adaptive concurrent↔sequential switching through the real monitor "
             "poll() path. Forces sniper active, threshold=0%% (any error triggers switch), "
             "DRY_RUN forced. Use --test-sniper-polls N to control poll count."
+        ),
+    )
+    parser.add_argument(
+        "--test-sniper-phases",
+        action="store_true",
+        help=(
+            "Test two-phase sniper: sets window 30s from now, runs pre-release "
+            "Phase 1 no-ops then Phase 2 aggressive scans. DRY_RUN forced. "
+            "Use --test-sniper-polls N to control poll count (default: 20)."
         ),
     )
     args = parser.parse_args()
@@ -227,6 +237,17 @@ async def main() -> None:
             config.restaurant_slug = args.test_restaurant
             monitor = TockMonitor(config, browser, checker, notifier, tracker)
             await monitor.run_adaptive_test(args.test_sniper_polls)
+            return
+
+        # ── Mode: --test-sniper-phases ────────────────────────────────────
+        if args.test_sniper_phases:
+            if not await browser.login():
+                logger.error("Login failed — cannot run --test-sniper-phases.")
+                sys.exit(1)
+            await test_sniper_phases(
+                browser, config, notifier, checker, tracker,
+                num_polls=args.test_sniper_polls,
+            )
             return
 
         # ── Mode: --verify ────────────────────────────────────────────

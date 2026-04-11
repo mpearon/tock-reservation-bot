@@ -627,4 +627,84 @@ async def test_sniper_integration(
         config.sniper_days         = orig_days
         config.sniper_times        = orig_times
         config.sniper_duration_min = orig_dur
-        config.dry_run             = orig_dry_run
+
+
+async def test_sniper_phases(
+    browser,
+    config,
+    notifier,
+    checker,
+    tracker,
+    num_polls: int = 20,
+) -> None:
+    """
+    Simulate the two-phase sniper: Phase 1 (pre-release no-ops) then Phase 2
+    (aggressive scan). Sets the sniper window to start 30s from now so Phase 1
+    runs for ~30s, then Phase 2 kicks in automatically.
+
+    Prints a phase log so you can confirm:
+      - Phase 1 polls: check_all returns [] immediately (pre-release)
+      - Phase 2 polls: check_all scans calendars (aggressive)
+
+    DRY_RUN is forced — no booking ever fires.
+    """
+    import asyncio
+    from datetime import datetime, timedelta
+    import pytz
+
+    logger = logging.getLogger("main")
+
+    config.dry_run = True
+    PT = pytz.timezone("America/Los_Angeles")
+    now_pt = datetime.now(PT)
+
+    # Set sniper to start 30s from now so we observe both phases
+    start_time = now_pt + timedelta(seconds=30)
+    config.sniper_days = [start_time.strftime("%A")]
+    config.sniper_times = [start_time.strftime("%H:%M")]
+    config.sniper_duration_min = 3  # 3 min window — enough to test both phases
+
+    logger.info(
+        f"\n{'='*60}\n"
+        f"[test-sniper-phases] Two-phase sniper test\n"
+        f"  Window start : {config.sniper_times[0]} PT (in ~30s)\n"
+        f"  Phase 1 ends : +60s after window start (pre-release no-op)\n"
+        f"  Phase 2 starts: +60s (aggressive calendar scan)\n"
+        f"  Polls        : {num_polls}\n"
+        f"  Booking      : DISABLED (DRY_RUN)\n"
+        f"{'='*60}"
+    )
+
+    from src.monitor import TockMonitor
+    monitor = TockMonitor(config, browser, checker, notifier, tracker)
+
+    # Manually drive polls, sleeping 3s between each
+    for i in range(1, num_polls + 1):
+        # Calculate what phase we'd be in
+        now_pt = datetime.now(PT)
+        sniper_start = now_pt.replace(
+            hour=int(config.sniper_times[0].split(":")[0]),
+            minute=int(config.sniper_times[0].split(":")[1]),
+            second=0, microsecond=0
+        )
+        sniper_age = max(0.0, (now_pt - sniper_start).total_seconds())
+        in_window = 0 <= sniper_age < config.sniper_duration_min * 60
+
+        if in_window and sniper_age < 60:
+            phase = "PHASE-1 (pre-release no-op)"
+        elif in_window:
+            phase = "PHASE-2 (aggressive scan)"
+        else:
+            phase = "PRE-WINDOW (not in sniper)"
+
+        logger.info(f"[test-sniper-phases] ── Poll {i}/{num_polls} [{phase}] ──")
+        await monitor.poll()
+        await asyncio.sleep(3)
+
+    logger.info(
+        f"\n{'='*60}\n"
+        f"[test-sniper-phases] Done.\n"
+        f"  Review log for PHASE-1 (no calendar scans) and\n"
+        f"  PHASE-2 (calendar scans with abort-on-first-slot).\n"
+        f"{'='*60}"
+    )
