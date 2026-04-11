@@ -627,6 +627,7 @@ async def test_sniper_integration(
         config.sniper_days         = orig_days
         config.sniper_times        = orig_times
         config.sniper_duration_min = orig_dur
+        config.dry_run             = orig_dry_run
 
 
 async def test_sniper_phases(
@@ -687,8 +688,9 @@ async def test_sniper_phases(
             minute=int(config.sniper_times[0].split(":")[1]),
             second=0, microsecond=0
         )
-        sniper_age = max(0.0, (now_pt - sniper_start).total_seconds())
-        in_window = 0 <= sniper_age < config.sniper_duration_min * 60
+        raw_age = (now_pt - sniper_start).total_seconds()
+        sniper_age = max(0.0, raw_age)
+        in_window = raw_age >= 0 and sniper_age < config.sniper_duration_min * 60
 
         if in_window and sniper_age < 60:
             phase = "PHASE-1 (pre-release no-op)"
