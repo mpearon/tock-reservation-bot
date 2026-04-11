@@ -80,11 +80,16 @@ class Notifier:
     def no_slots_found(self) -> None:
         logger.info("No available slots found this cycle.")
 
-    def slots_found(self, slots: list) -> None:
+    def slots_found(self, slots: list, sniper_mode: bool = False) -> None:
         lines = [f"• {s.slot_date_str} ({s.day_of_week}) @ {s.slot_time}" for s in slots[:8]]
         extra = f"\n+{len(slots) - 8} more…" if len(slots) > 8 else ""
         summary = "\n".join(lines) + extra
         logger.info(f"[slots] {len(slots)} slot(s) found:\n{summary}")
+        if sniper_mode:
+            # In sniper mode the bot is already attempting to book — suppress
+            # the Discord embed so the "slots found" and "booking confirmed"
+            # don't arrive out of order or before booking completes.
+            return
         self._fire(
             title=f"🟡 {len(slots)} Slot(s) Available!",
             description=summary,

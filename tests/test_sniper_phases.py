@@ -142,3 +142,61 @@ async def test_post_release_proceeds_to_scan():
             sniper_window_age_sec=61.0,
         )
     assert mock_check.call_count > 0
+
+
+def test_slots_found_discord_suppressed_in_sniper(caplog):
+    """slots_found(sniper_mode=True) must not call _fire() (Discord)."""
+    from src.notifier import Notifier
+    from src.config import Config
+    config = Config(
+        tock_email="t@t.com", tock_password="pw", restaurant_slug="test",
+        party_size=2, preferred_days=["Friday"], fallback_days=[],
+        preferred_time="17:00", scan_weeks=4, dry_run=True, headless=True,
+        sniper_days=["Friday"], sniper_times=["19:59"], sniper_duration_min=11,
+        sniper_interval_sec=3, release_window_days=["Monday"],
+        release_window_start="09:00", release_window_end="11:00",
+        debug_screenshots=False,
+        discord_webhook_url="https://discord.example.com/webhook",
+        card_cvc="",
+    )
+    notifier = Notifier(config)
+    fire_calls = []
+    notifier._fire = lambda *a, **kw: fire_calls.append((a, kw))
+
+    from src.checker import AvailableSlot
+    from datetime import date
+    slots = [AvailableSlot(
+        slot_date=date(2026, 4, 17), slot_time="5:00 PM", day_of_week="Friday"
+    )]
+    notifier.slots_found(slots, sniper_mode=True)
+
+    assert fire_calls == [], "Discord _fire must not be called in sniper mode"
+
+
+def test_slots_found_discord_sent_outside_sniper():
+    """slots_found(sniper_mode=False) MUST call _fire() (Discord notification)."""
+    from src.notifier import Notifier
+    from src.config import Config
+    config = Config(
+        tock_email="t@t.com", tock_password="pw", restaurant_slug="test",
+        party_size=2, preferred_days=["Friday"], fallback_days=[],
+        preferred_time="17:00", scan_weeks=4, dry_run=True, headless=True,
+        sniper_days=["Friday"], sniper_times=["19:59"], sniper_duration_min=11,
+        sniper_interval_sec=3, release_window_days=["Monday"],
+        release_window_start="09:00", release_window_end="11:00",
+        debug_screenshots=False,
+        discord_webhook_url="https://discord.example.com/webhook",
+        card_cvc="",
+    )
+    notifier = Notifier(config)
+    fire_calls = []
+    notifier._fire = lambda *a, **kw: fire_calls.append((a, kw))
+
+    from src.checker import AvailableSlot
+    from datetime import date
+    slots = [AvailableSlot(
+        slot_date=date(2026, 4, 17), slot_time="5:00 PM", day_of_week="Friday"
+    )]
+    notifier.slots_found(slots, sniper_mode=False)
+
+    assert len(fire_calls) == 1, "Discord _fire must be called outside sniper mode"

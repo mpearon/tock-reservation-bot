@@ -307,7 +307,7 @@ class TockMonitor:
         if self._sniper_active:
             self._sniper_slots_found += len(slots)
 
-        self.notifier.slots_found(slots)
+        self.notifier.slots_found(slots, sniper_mode=self._sniper_active)
 
         # --- Dry-run: log and stop ---
         if self.config.dry_run:
