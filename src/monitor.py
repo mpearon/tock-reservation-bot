@@ -218,7 +218,7 @@ class TockMonitor:
                     f"[monitor] Sniper window in {secs_to_sniper:.1f}s — "
                     f"holding for window (skipping regular poll)"
                 )
-                await asyncio.sleep(secs_to_sniper)
+                await self._countdown_hold(secs_to_sniper)
                 continue  # re-enter loop; _get_poll_interval will now see sniper mode
 
             interval = self._get_poll_interval()
@@ -396,6 +396,22 @@ class TockMonitor:
                 f"(rolling {rolling_rate:.0%})"
             )
 
+    async def _countdown_hold(self, secs: float) -> None:
+        """Sleep for *secs* seconds, logging a countdown every 10 seconds.
+
+        Used during the sniper hold guard so the bot shows it's alive rather
+        than going silent for up to 2 minutes before a sniper window opens.
+        """
+        remaining = secs
+        while remaining > 0:
+            chunk = min(10.0, remaining)
+            if remaining > 10:
+                logger.info(
+                    f"[monitor] ⏳ Sniper window in {remaining:.0f}s — holding…"
+                )
+            await asyncio.sleep(chunk)
+            remaining -= chunk
+
     # ------------------------------------------------------------------
     # Scheduling
     # ------------------------------------------------------------------
@@ -425,6 +441,12 @@ class TockMonitor:
                 self._sniper_concurrent = True
                 self._sniper_error_window.clear()
                 self._sniper_sequential_clean = 0
+                # Clear normal-mode skip cache so all dates are retried fresh
+                # during the sniper window (release may open any date)
+                self.checker.clear_normal_skip_cache()
+                # Refresh screenshot count from disk so rotation stays accurate
+                # even when old screenshots from previous runs are on disk
+                self.checker.refresh_screenshot_count()
                 self.notifier.sniper_mode_active(
                     day=day_name,
                     trigger_time=t.strftime("%H:%M"),

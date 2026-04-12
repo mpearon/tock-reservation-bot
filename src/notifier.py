@@ -72,6 +72,20 @@ class Notifier:
     def sniper_mode_ended(self, slots_found: int) -> None:
         msg = f"Sniper window ended. {slots_found} slot(s) detected during window."
         logger.info(f"[sniper] {msg}")
+        if slots_found == 0:
+            # Alert via Discord when the sniper window closed with nothing found —
+            # useful for knowing the release didn't happen / window needs adjustment.
+            self._fire(
+                title="😶 Sniper Window Ended — 0 Slots Found",
+                description=(
+                    f"The sniper window closed without finding any available slots.\n\n"
+                    f"**What this might mean:**\n"
+                    f"• Restaurant hasn't released yet — check for a new release date\n"
+                    f"• Release happened but slots sold out instantly\n"
+                    f"• Sniper window timing may need adjustment"
+                ),
+                color=_GREY,
+            )
 
     # ------------------------------------------------------------------
     # Availability

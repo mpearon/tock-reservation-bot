@@ -12,8 +12,10 @@ updates to src/selectors.py are straightforward.
 """
 
 import asyncio
+import glob as _glob
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -23,12 +25,43 @@ import src.selectors as sel
 from src.config import Config, parse_time
 from src.tracker import SlotTracker
 
-# Debug screenshot: capture one screenshot per poll cycle on the first date
-# checked. Overwrites each time so disk doesn't fill up.
+# Debug screenshot directories
 _SCREENSHOT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "debug_screenshots")
+_SCREENSHOT_ERROR_DIR = os.path.join(_SCREENSHOT_DIR, "errors")
 os.makedirs(_SCREENSHOT_DIR, exist_ok=True)
+os.makedirs(_SCREENSHOT_ERROR_DIR, exist_ok=True)
+
+# Normal screenshots: keep the most recent N, delete oldest when over limit.
+# Error screenshots (saved to _SCREENSHOT_ERROR_DIR) are NEVER deleted.
+MAX_DEBUG_SCREENSHOTS = 50
+
+# Non-sniper skip cache TTL: 20 minutes.  Dates whose calendar day was not
+# visible are skipped for this long before being retried.  This avoids
+# spending ~15s per "day not visible" date on every normal poll cycle.
+NORMAL_SKIP_TTL_SEC = 1200  # 20 minutes
 
 logger = logging.getLogger(__name__)
+
+
+def _prune_screenshots(directory: str, max_count: int = MAX_DEBUG_SCREENSHOTS) -> None:
+    """Delete the oldest .png files in *directory* until at most max_count remain.
+
+    Never touches subdirectories (i.e. the errors/ subfolder is untouched).
+    Safe to call on non-existent or empty directories.
+    """
+    try:
+        pattern = os.path.join(directory, "*.png")
+        files = sorted(_glob.glob(pattern), key=os.path.getmtime)
+        excess = len(files) - max_count
+        if excess > 0:
+            for path in files[:excess]:
+                try:
+                    os.remove(path)
+                    logger.debug(f"[check] Pruned old screenshot: {os.path.basename(path)}")
+                except OSError:
+                    pass
+    except Exception as e:
+        logger.debug(f"[check] Screenshot prune failed: {e}")
 
 BASE_URL = "https://www.exploretock.com"
 
@@ -68,24 +101,76 @@ class AvailabilityChecker:
         # opening fresh — faster (no DNS/TCP overhead) and looks more human.
         self._sniper_pages: dict[str, "Page"] = {}  # date_str -> open Page
         self._screenshot_taken_this_poll = False  # reset each poll cycle
-        # Dates that failed to show the target day in the calendar.
+        # Sniper-mode skip cache: dates that failed to show target day in calendar.
         # Cleared when sniper pages are closed (new window).
         self._skip_dates: set[str] = set()
         self._skip_cache_enabled: bool = True
+        # Normal-mode skip cache: date_str → monotonic timestamp when cached.
+        # Persists across polls (TTL=NORMAL_SKIP_TTL_SEC) to avoid re-hitting
+        # dates that are beyond the booking window every poll cycle.
+        # Cleared when sniper mode activates (via clear_normal_skip_cache()).
+        self._normal_skip_dates: dict[str, float] = {}
+        # Track count of existing normal screenshots for rotation.
+        # Populated from disk by refresh_screenshot_count() before sniper.
+        self._screenshot_count: int = 0
 
     # ------------------------------------------------------------------
     # Public
     # ------------------------------------------------------------------
 
     def clear_skip_cache(self) -> None:
-        """Clear the skip-date cache. Call at the start of each sniper poll."""
+        """Clear the sniper-mode skip-date cache. Call at the start of each sniper poll."""
         self._skip_dates.clear()
 
     def _should_skip_date(self, date_str: str, skip_cache_enabled: bool) -> bool:
-        """Return True if this date should be skipped based on cache."""
+        """Return True if this date should be skipped based on sniper cache."""
         if not skip_cache_enabled:
             return False
         return date_str in self._skip_dates
+
+    # ------------------------------------------------------------------
+    # Normal-mode skip cache
+    # ------------------------------------------------------------------
+
+    def _add_to_normal_skip(self, date_str: str) -> None:
+        """Cache *date_str* as not-visible-in-calendar for NORMAL_SKIP_TTL_SEC."""
+        self._normal_skip_dates[date_str] = time.monotonic()
+
+    def _should_skip_normal(self, date_str: str) -> bool:
+        """Return True if *date_str* is in the normal skip cache and still fresh."""
+        ts = self._normal_skip_dates.get(date_str)
+        if ts is None:
+            return False
+        if time.monotonic() - ts > NORMAL_SKIP_TTL_SEC:
+            # Expired — evict and retry
+            del self._normal_skip_dates[date_str]
+            return False
+        return True
+
+    def clear_normal_skip_cache(self) -> None:
+        """Clear the normal-mode skip cache. Called when sniper mode activates."""
+        self._normal_skip_dates.clear()
+        logger.debug("[check] Normal skip cache cleared (sniper mode starting).")
+
+    # ------------------------------------------------------------------
+    # Screenshot count management
+    # ------------------------------------------------------------------
+
+    def refresh_screenshot_count(self) -> None:
+        """Count existing normal screenshots from disk.
+
+        Call before sniper mode so rotation stays accurate even when old
+        screenshots from previous bot runs are already on disk.
+        """
+        try:
+            pattern = os.path.join(_SCREENSHOT_DIR, "*.png")
+            self._screenshot_count = len(_glob.glob(pattern))
+            logger.debug(
+                f"[check] Screenshot count refreshed: {self._screenshot_count} "
+                f"existing file(s) in debug_screenshots/"
+            )
+        except Exception as e:
+            logger.debug(f"[check] Screenshot count refresh failed: {e}")
 
     def get_warm_page(self, date_str: str) -> "Page | None":
         """Return the warm sniper page for a date, or None if unavailable."""
@@ -273,11 +358,16 @@ class AvailabilityChecker:
         """
         date_str = target_date.isoformat()
 
-        # Skip dates that already failed (day not in calendar — beyond booking window).
-        # Only skip during sniper mode (keep_page=True) to avoid wasting poll time.
-        # Cache is cleared when sniper pages close (new window = new release possible).
+        # Sniper-mode skip: date failed last poll — skip until pages close.
         if keep_page and self._should_skip_date(date_str, skip_cache_enabled=self._skip_cache_enabled):
-            logger.debug(f"[check] {date_str} — skipped (not in calendar last poll)")
+            logger.debug(f"[check] {date_str} — skipped (sniper cache: not in calendar last poll)")
+            return []
+
+        # Normal-mode skip: date was not visible in calendar on a recent poll.
+        # Skip for NORMAL_SKIP_TTL_SEC (20 min) to avoid ~15s calendar timeout
+        # per date per poll cycle when dates are beyond the booking window.
+        if not keep_page and self._should_skip_normal(date_str):
+            logger.debug(f"[check] {date_str} — skipped (normal cache: not in calendar recently)")
             return []
 
         # Sniper interrupt: another date already found slots — skip immediately
@@ -335,7 +425,12 @@ class AvailabilityChecker:
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     path = os.path.join(_SCREENSHOT_DIR, f"poll_{ts}_{date_str}.png")
                     await page.screenshot(path=path, full_page=True)
+                    self._screenshot_count += 1
                     logger.info(f"[check] Debug screenshot saved: {path}")
+                    # Rotate: keep only the most recent MAX_DEBUG_SCREENSHOTS
+                    if self._screenshot_count > MAX_DEBUG_SCREENSHOTS:
+                        _prune_screenshots(_SCREENSHOT_DIR, MAX_DEBUG_SCREENSHOTS)
+                        self._screenshot_count = MAX_DEBUG_SCREENSHOTS
                 except Exception as e:
                     logger.debug(f"[check] Screenshot failed: {e}")
 
@@ -355,7 +450,15 @@ class AvailabilityChecker:
             if not clicked:
                 logger.info(f"[check] {date_str} — could not click day in calendar")
                 if keep_page:
+                    # Sniper mode: add to per-window skip set
                     self._skip_dates.add(date_str)
+                else:
+                    # Normal mode: cache for NORMAL_SKIP_TTL_SEC to avoid
+                    # wasting time re-checking dates beyond the booking window
+                    self._add_to_normal_skip(date_str)
+                    logger.debug(
+                        f"[check] {date_str} cached in normal skip (TTL {NORMAL_SKIP_TTL_SEC}s)"
+                    )
                 return []
 
             # Try multiple selectors for slot/booking buttons.
@@ -458,6 +561,17 @@ class AvailabilityChecker:
             if not keep_page:
                 await page.close()
 
+    async def _save_error_screenshot(self, page: Page, date_str: str, label: str) -> None:
+        """Save a screenshot to the errors/ subfolder. Never deleted automatically."""
+        try:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"error_{ts}_{label}_{date_str}.png"
+            path = os.path.join(_SCREENSHOT_ERROR_DIR, filename)
+            await page.screenshot(path=path, full_page=True)
+            logger.info(f"[check] Error screenshot saved: errors/{filename}")
+        except Exception as e:
+            logger.debug(f"[check] Error screenshot failed: {e}")
+
     async def _wait_for_calendar(self, page: Page, date_str: str, timeout: int = 15000) -> bool:
         """Wait for the calendar container to appear. Logs selector failures."""
         key = "calendar_container"
@@ -475,6 +589,9 @@ class AvailabilityChecker:
                 f"    • Bot detection triggered — try HEADLESS=false\n"
                 f"  Error: {e}"
             )
+            # Save error screenshot for diagnosis (never rotated/deleted)
+            if self.config.debug_screenshots:
+                await self._save_error_screenshot(page, date_str, "cal_load_fail")
             return False
 
     async def _is_day_available(self, page: Page, target_date: date) -> bool:

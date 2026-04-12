@@ -32,6 +32,7 @@ ENV/
 
 # === Launch scripts with tokens ===
 start-claude.sh
+run.sh
 
 # === Bot runtime state (local only) ===
 session_cookies.json
