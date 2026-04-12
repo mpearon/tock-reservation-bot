@@ -50,7 +50,7 @@ def _prune_screenshots(directory: str, max_count: int = MAX_DEBUG_SCREENSHOTS) -
     Safe to call on non-existent or empty directories.
     """
     try:
-        pattern = os.path.join(directory, "*.png")
+        pattern = os.path.join(directory, "poll_*.png")
         files = sorted(_glob.glob(pattern), key=os.path.getmtime)
         excess = len(files) - max_count
         if excess > 0:
@@ -163,7 +163,7 @@ class AvailabilityChecker:
         screenshots from previous bot runs are already on disk.
         """
         try:
-            pattern = os.path.join(_SCREENSHOT_DIR, "*.png")
+            pattern = os.path.join(_SCREENSHOT_DIR, "poll_*.png")
             self._screenshot_count = len(_glob.glob(pattern))
             logger.debug(
                 f"[check] Screenshot count refreshed: {self._screenshot_count} "
@@ -548,6 +548,8 @@ class AvailabilityChecker:
 
         except Exception as e:
             logger.error(f"[check] Unexpected error for {date_str}: {e}")
+            if self.config.debug_screenshots:
+                await self._save_error_screenshot(page, date_str, "unexpected_error")
             if keep_page and date_str in self._sniper_pages:
                 # Drop broken page so next poll creates a fresh one
                 del self._sniper_pages[date_str]

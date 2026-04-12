@@ -77,12 +77,8 @@ async def detect_release_time(browser, config) -> datetime | None:
             f"[release-detect] Found: '{date_str} at {time_str} {tz_str}'"
         )
 
-        # Parse naive datetime
-        try:
-            naive_dt = datetime.strptime(f"{date_str} {time_str}", "%B %d, %Y %I:%M %p")
-        except ValueError:
-            # Try without leading zero in day
-            naive_dt = datetime.strptime(f"{date_str} {time_str}", "%B %d, %Y %I:%M %p")
+        # Parse naive datetime (%d handles both "3" and "03")
+        naive_dt = datetime.strptime(f"{date_str} {time_str}", "%B %d, %Y %I:%M %p")
 
         # Localize to PT (handles PDT/PST automatically via America/Los_Angeles)
         release_dt = PT.localize(naive_dt)
