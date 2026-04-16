@@ -182,6 +182,7 @@ def get_slot_button_selectors() -> list[str]:
         SELECTORS["book_now_button"],
         "button.SearchExperience-bookButton",
         "[data-testid='book-button']",
+        "[data-testid='booking-card-button']"
     ]
 
 
