@@ -36,6 +36,7 @@ class Config:
     fallback_days: list[str]    # e.g. ["Monday", "Tuesday"] — only if no preferred slots found
     preferred_time: str         # e.g. "17:00" (24-hour)
     scan_weeks: int
+    scan_weeks_lookahead: int
 
     # Normal release-window polling (60s)
     release_window_days: list[str]   # e.g. ["Monday"]
@@ -124,6 +125,7 @@ def load_config() -> Config:
             if d.strip()
         ],
         preferred_time=os.getenv("PREFERRED_TIME", "17:00"),
+        scan_weeks_lookahead=int(os.getenv("SCAN_WEEKS_LOOKAHEAD", "2")),
         scan_weeks=int(os.getenv("SCAN_WEEKS", "2")),
         release_window_days=[
             d.strip()

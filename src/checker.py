@@ -990,10 +990,17 @@ class AvailabilityChecker:
         if days is None:
             days = self.config.preferred_days
         weeks = self.config.sniper_scan_weeks if sniper_mode else self.config.scan_weeks
+        weeksOffset = self.config.scan_weeks_lookahead
         today = date.today()
+        
+        offset = today + timedelta(weeks=weeksOffset)
+        start = offset if weeksOffset > 0 else date.today()
+        
         end = today + timedelta(weeks=weeks)
         result = []
-        current = today + timedelta(days=1)
+        
+        #current = today + timedelta(days=1)
+        current = start + timedelta(days=1)
         while current <= end:
             if current.strftime("%A") in days:
                 result.append(current)
