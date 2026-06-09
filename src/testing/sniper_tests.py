@@ -235,7 +235,11 @@ async def test_sniper_robustness(
     logger.info(f"{'='*60}")
 
     test_config = config.__class__(
-        **{**config.__dict__, "restaurant_slug": test_slug, "dry_run": True}
+        # This test exercises the page-reuse/reload mechanism specifically, so
+        # force it on regardless of the deployed default (sniper_reuse_pages
+        # now defaults False — fresh page per poll).
+        **{**config.__dict__, "restaurant_slug": test_slug, "dry_run": True,
+           "sniper_reuse_pages": True}
     )
     tracker = SlotTracker()
     checker = AvailabilityChecker(test_config, browser, tracker)

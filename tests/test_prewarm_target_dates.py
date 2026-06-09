@@ -23,6 +23,9 @@ def _make_checker():
         sniper_interval_sec=3, release_window_days=["Monday"],
         release_window_start="09:00", release_window_end="11:00",
         debug_screenshots=False, discord_webhook_url="", card_cvc="",
+        # This file exercises prewarm's page-PARKING behavior, which only
+        # happens when reuse is enabled (the default is now off — fresh pages).
+        sniper_reuse_pages=True,
     )
     browser = MagicMock()
     browser.new_page = AsyncMock()

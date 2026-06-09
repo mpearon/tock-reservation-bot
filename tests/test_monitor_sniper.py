@@ -62,6 +62,7 @@ def _make_monitor(config=None, **config_overrides) -> TockMonitor:
     checker = MagicMock()
     checker.check_all = AsyncMock(return_value=[])
     checker.close_sniper_pages = AsyncMock()
+    checker.close_replay_session = AsyncMock()
     checker.last_checks = 0
     checker.last_errors = 0
 
@@ -717,3 +718,39 @@ class TestMonitorPrewarmFailure:
                 mon._session_prewarmed_for = prewarm_target
 
         assert mon._session_prewarmed_for == "Wednesday@19:59"
+
+
+class TestShouldPrewarmDates:
+    """_should_prewarm_dates() gates the date-page (page-opening) prewarm.
+
+    Date-page prewarm only pays off when sniper REUSES pages — with reuse off
+    (the default) the pre-opened pages are discarded, so the helper returns None
+    and run() skips the work. It also returns None when no window is in range or
+    we already prewarmed for this one.
+    """
+
+    def test_none_when_reuse_off(self):
+        mon = _make_monitor(sniper_reuse_pages=False)
+        mon._get_dates_prewarm_target = MagicMock(return_value="Friday@19:59")
+        mon._session_dates_prewarmed_for = None
+        assert mon._should_prewarm_dates() is None
+        # The flag short-circuits — don't even consult the timing helper.
+        mon._get_dates_prewarm_target.assert_not_called()
+
+    def test_returns_target_when_reuse_on_and_due(self):
+        mon = _make_monitor(sniper_reuse_pages=True)
+        mon._get_dates_prewarm_target = MagicMock(return_value="Friday@19:59")
+        mon._session_dates_prewarmed_for = None
+        assert mon._should_prewarm_dates() == "Friday@19:59"
+
+    def test_none_when_already_prewarmed_for_target(self):
+        mon = _make_monitor(sniper_reuse_pages=True)
+        mon._get_dates_prewarm_target = MagicMock(return_value="Friday@19:59")
+        mon._session_dates_prewarmed_for = "Friday@19:59"
+        assert mon._should_prewarm_dates() is None
+
+    def test_none_when_no_window_in_range(self):
+        mon = _make_monitor(sniper_reuse_pages=True)
+        mon._get_dates_prewarm_target = MagicMock(return_value=None)
+        mon._session_dates_prewarmed_for = None
+        assert mon._should_prewarm_dates() is None

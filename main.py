@@ -20,6 +20,7 @@ Usage:
 
 import asyncio
 import logging
+import os
 import sys
 from argparse import ArgumentParser
 from logging.handlers import RotatingFileHandler
@@ -40,6 +41,42 @@ LOG_MAX_BYTES = 25 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
 
 
+def _stdout_targets_same_file(log_path: str) -> bool:
+    """True when ``sys.stdout``'s underlying fd resolves to the exact same
+    inode as ``log_path``.
+
+    Happens when the bot is launched with shell redirection
+    (``python main.py >> bot.log 2>&1``): the shell points FD 1 at bot.log
+    BEFORE the Python process starts. If we then also attach a
+    RotatingFileHandler to bot.log, every record gets written twice — once
+    by the StreamHandler writing to FD 1, once by the RotatingFileHandler
+    writing directly. lsof on PID 46162 (5/22 production process)
+    confirmed three writable FDs on bot.log; bot.log itself had every
+    line duplicated byte-for-byte.
+
+    Returns False whenever stdout cannot be inode-compared with log_path:
+      - stdout has no fd (StringIO under pytest, mock stream) — AttributeError
+      - stdout's fd cannot be stat'd                          — OSError
+      - log_path does not exist on disk yet                   — OSError
+    or when the comparison succeeds and the inodes differ:
+      - TTY, pipe, or any other fifo/character device
+      - PM2 / systemd capture file (different file from log_path)
+      - ``tee`` upstream of a copy into log_path (different inode)
+    """
+    try:
+        stdout_stat = os.fstat(sys.stdout.fileno())
+    except (OSError, AttributeError, ValueError):
+        return False
+    try:
+        log_stat = os.stat(log_path)
+    except OSError:
+        return False
+    return (
+        stdout_stat.st_dev == log_stat.st_dev
+        and stdout_stat.st_ino == log_stat.st_ino
+    )
+
+
 def _setup_logging(
     log_path: str = "bot.log",
     max_bytes: int = LOG_MAX_BYTES,
@@ -48,7 +85,6 @@ def _setup_logging(
     fmt = "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
     handlers: list[logging.Handler] = [
-        logging.StreamHandler(sys.stdout),
         RotatingFileHandler(
             log_path,
             maxBytes=max_bytes,
@@ -56,6 +92,11 @@ def _setup_logging(
             encoding="utf-8",
         ),
     ]
+    # Only add the stdout StreamHandler when stdout is NOT already pointing
+    # at the same file as the RotatingFileHandler — otherwise every record
+    # would land in bot.log twice (5/22 duplicate-line incident).
+    if not _stdout_targets_same_file(log_path):
+        handlers.insert(0, logging.StreamHandler(sys.stdout))
     # force=True so calling _setup_logging() in tests replaces the prior
     # handler set (logging.basicConfig is otherwise a no-op after first call).
     logging.basicConfig(

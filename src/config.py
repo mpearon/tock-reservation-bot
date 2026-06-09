@@ -51,6 +51,20 @@ class Config:
     sniper_scan_weeks: int = 2       # scan-range cap during sniper mode (Tock releases ≤2 wks)
     prewarm_min_days_out: int = 5    # skip dates closer than this during target-date prewarm
 
+    # Sniper page-reuse. When True, sniper mode keeps one Playwright page open
+    # per target date across polls and reloads them (page.reload) instead of
+    # navigating fresh; prewarm parks pages for the first poll to reuse.
+    # DEFAULT FALSE after the 2026-05-31 investigation
+    # (spikes/warm_vs_cold_repro.py): repeatedly reloading ~14 kept-open SPA
+    # pages under concurrent sniper load accumulates renderer state and starves
+    # hydration — ~19% first-attempt calendar-load timeouts with unrecoverable
+    # bursts (6/14, 5/14) vs ~3.6% all-recovered for fresh pages, and it was
+    # not faster. Fresh-page-per-poll is the reliable default; the detection
+    # scan is the load-bearing post-release safety net. Set
+    # SNIPER_REUSE_PAGES=true to opt back into reuse (also keeps the warm
+    # page→booker handoff).
+    sniper_reuse_pages: bool = False
+
     # B1.5 — skip _click_day when the URL date is authoritative.
     # When True, checker tries _collect_slots_multi without clicking the
     # calendar day first; falls back to clicking + retrying once if 0 slots
@@ -145,6 +159,7 @@ def load_config() -> Config:
         sniper_interval_sec=int(os.getenv("SNIPER_INTERVAL_SEC", "3")),
         sniper_scan_weeks=int(os.getenv("SNIPER_SCAN_WEEKS", "2")),
         prewarm_min_days_out=int(os.getenv("PREWARM_MIN_DAYS_OUT", "5")),
+        sniper_reuse_pages=os.getenv("SNIPER_REUSE_PAGES", "false").lower() == "true",
         skip_day_click_check=os.getenv("SKIP_DAY_CLICK_CHECK", "false").lower() == "true",
         event_driven_detection=os.getenv("EVENT_DRIVEN_DETECTION", "false").lower() == "true",
         event_driven_url_pattern=os.getenv("EVENT_DRIVEN_URL_PATTERN", "").strip(),

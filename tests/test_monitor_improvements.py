@@ -46,6 +46,7 @@ def _make_monitor(config=None):
     checker = MagicMock()
     checker.check_all = AsyncMock(return_value=[])
     checker.close_sniper_pages = AsyncMock()
+    checker.close_replay_session = AsyncMock()
     checker.last_checks = 0
     checker.last_errors = 0
     checker.clear_normal_skip_cache = MagicMock()

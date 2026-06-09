@@ -143,13 +143,28 @@ class Notifier:
     def booking_aborted(self, slot, reason: str) -> None:
         logger.info(f"[book] Aborted {slot}: {reason}")
 
-    def booking_failed(self, slot, reason: str) -> None:
-        msg = f"{slot} — {reason}"
-        logger.warning(f"[book] FAILED: {msg}")
+    def booking_failed(self, slots, reason: str) -> None:
+        """Alert that every booking attempt this cycle failed.
+
+        `slots` is the list of slots that were attempted (booked_slot is None
+        on a FAILED outcome, so we summarize what was tried). Accepts a single
+        slot too, for convenience. Fires a critical RED embed so it survives
+        the shutdown drain.
+        """
+        if not isinstance(slots, (list, tuple)):
+            slots = [slots]
+        slots = list(slots)
+        lines = "\n".join(f"• {s}" for s in slots)
+        msg = (
+            f"{len(slots)} slot(s) detected but could not be booked:\n"
+            f"{lines}\n\nReason: {reason}"
+        )
+        logger.warning(f"[book] FAILED ({len(slots)} slot(s)): {reason}")
         self._fire(
-            title="❌ Booking Failed",
+            title=f"❌ Booking Failed — {len(slots)} slot(s)",
             description=msg,
             color=_RED,
+            critical=True,
         )
 
     def no_payment_method(self, slot) -> None:

@@ -85,6 +85,23 @@ _MAX_BOOKING_HOUR = 23
 
 
 @dataclass
+class ReplayParseDiag:
+    """Diagnostics from one parse of a calendar/full body.
+
+    We are otherwise BLIND to why the replay path returns 0 slots for
+    fuhuihua (the ghost-slot guards silently filter sections). These
+    counts let `check_all` log, at INFO, exactly how many date sections
+    the size/time guards rejected so the thresholds can be re-tuned from
+    real captures instead of guessed.
+    """
+    body_len: int = 0
+    date_hits: int = 0          # total date-string regex matches in body
+    unique_dates: int = 0       # distinct date markers
+    sections_passed: int = 0    # date sections that cleared BOTH guards
+    sections_filtered: int = 0  # date sections rejected by a guard
+
+
+@dataclass
 class CalendarReplaySession:
     """One restaurant's captured replay context.
 
@@ -263,6 +280,22 @@ def parse_available_slots(
 ) -> list["AvailableSlot"]:
     """Extract (date, time) pairs from the calendar/full protobuf body.
 
+    Thin wrapper over `parse_with_diagnostics` (which carries the full
+    algorithm). Returns AvailableSlot list (deduplicated, ordered by date
+    then time). Kept as the stable public entry point — most callers don't
+    need the diagnostics.
+    """
+    slots, _diag = parse_with_diagnostics(body, target_dates)
+    return slots
+
+
+def parse_with_diagnostics(
+    body: bytes, target_dates: list[date],
+) -> "tuple[list[AvailableSlot], ReplayParseDiag]":
+    """Like `parse_available_slots`, but ALSO returns a `ReplayParseDiag`
+    counting body length, date-string hits, and how many date sections
+    passed vs were filtered by the ghost-slot guards.
+
     Strategy:
       - The body is protobuf-encoded but date/time strings are stored
         as plain ASCII inside the binary frame.
@@ -277,18 +310,24 @@ def parse_available_slots(
         the protobuf body has framing bytes that look like 00:00,
         01:23, etc.
 
-    Returns AvailableSlot list (deduplicated, ordered by date then time).
+    The diagnostics exist because the size/time guards below were
+    calibrated on benu (high-volume) and silently drop a real fuhuihua
+    release (few seatings → sub-threshold section). Surfacing the
+    passed/filtered counts lets `check_all` log them so we can re-tune
+    from real captures instead of flying blind.
     """
     from src.checker import AvailableSlot
 
     target_iso = {d.isoformat(): d for d in target_dates}
+    diag = ReplayParseDiag(body_len=len(body))
 
     # Find every date occurrence with its byte offset
     date_hits: list[tuple[int, str]] = []
     for m in _DATE_RE.finditer(body):
         date_hits.append((m.start(), m.group(0).decode()))
+    diag.date_hits = len(date_hits)
     if not date_hits:
-        return []
+        return [], diag
 
     # For each unique date, find the contiguous range from its FIRST
     # occurrence to the FIRST occurrence of the next unique date.
@@ -299,6 +338,7 @@ def parse_available_slots(
         if d not in first_offset_per_date:
             first_offset_per_date[d] = off
             seen_dates.append(d)
+    diag.unique_dates = len(seen_dates)
 
     slots_by_date: dict[str, set[str]] = {}
     for i, d in enumerate(seen_dates):
@@ -319,6 +359,7 @@ def parse_available_slots(
         # framing bytes that happen to look like times to a date the
         # restaurant has 0 availability for.
         if len(section) < _MIN_BOOKABLE_SECTION_BYTES:
+            diag.sections_filtered += 1
             logger.debug(
                 f"[calendar-replay] skipping date {d}: "
                 f"section {len(section)}b < {_MIN_BOOKABLE_SECTION_BYTES}b "
@@ -334,6 +375,7 @@ def parse_available_slots(
                 # Format as "H:MM AM/PM" to match the bot's slot_time format
                 times.add(_format_24h_to_12h(hh, mm))
         if len(times) < _MIN_BOOKABLE_TIMES_PER_SECTION:
+            diag.sections_filtered += 1
             logger.debug(
                 f"[calendar-replay] skipping date {d}: "
                 f"only {len(times)} time(s) found "
@@ -341,6 +383,7 @@ def parse_available_slots(
                 "ghost slots from protobuf framing)"
             )
             continue
+        diag.sections_passed += 1
         if times:
             slots_by_date[d] = times
 
@@ -358,7 +401,7 @@ def parse_available_slots(
                     day_of_week=d.strftime("%A"),
                 )
             )
-    return result
+    return result, diag
 
 
 def cap_slots_per_date(

@@ -238,7 +238,8 @@ class TestCheckDateErrorScreenshot:
     @pytest.mark.asyncio
     async def test_error_screenshot_on_sniper_page_failure(self):
         """In sniper mode, error screenshot is saved and broken page is cleaned up."""
-        config = _make_config(debug_screenshots=True)
+        # Exercises the reuse/reload path (a parked page), so enable reuse.
+        config = _make_config(debug_screenshots=True, sniper_reuse_pages=True)
         browser = MagicMock()
         tracker = MagicMock()
         checker = AvailabilityChecker(config, browser, tracker)

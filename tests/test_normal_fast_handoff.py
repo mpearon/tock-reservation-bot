@@ -408,7 +408,7 @@ class TestSniperPathUnaffectedByRetain:
 
     @pytest.mark.asyncio
     async def test_sniper_keeps_page_in_sniper_pages_dict(self):
-        checker = _make_checker()
+        checker = _make_checker(sniper_reuse_pages=True)  # reuse keeps the page
         page = _make_mock_page()
         checker.browser.new_page = AsyncMock(return_value=page)
 
@@ -454,6 +454,7 @@ def _build_monitor(*, dry_run: bool, slots: list[AvailableSlot],
     checker.last_checks = max(1, len(slots))
     checker.last_errors = 0
     checker.close_sniper_pages = AsyncMock()
+    checker.close_replay_session = AsyncMock()
     checker.close_handoff_pages = AsyncMock()
     checker.flush_deferred = MagicMock()
     handoff_iter = iter(pop_handoff_results or [])
@@ -584,6 +585,44 @@ class TestMonitorEnablesFastHandoffInNormalMode:
         # The sniper warm-page accessor was used; handoff was not
         checker.pop_warm_page.assert_called()
         checker.pop_handoff_page.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sniper_reuse_off_falls_back_to_handoff_page(self):
+        """Sniper mode with reuse OFF (default): no kept warm page exists, but
+        the found-slot page was retained in _handoff_pages. The monitor must
+        try pop_warm_page (→ None) then fall back to pop_handoff_page and pass
+        that page to the booker."""
+        slot = AvailableSlot(
+            slot_date=date(2026, 5, 8),
+            slot_time="5:00 PM",
+            day_of_week="Friday",
+        )
+        handoff_page = MagicMock()
+        handoff_page.is_closed = MagicMock(return_value=False)
+        handoff_page.close = AsyncMock()
+        monitor, checker, _ = _build_monitor(
+            dry_run=False,
+            slots=[slot],
+            sniper_active=True,
+            pop_warm_results=[],                 # reuse off → no kept warm page
+            pop_handoff_results=[handoff_page],  # but the found page was retained
+        )
+
+        booker_calls = []
+        from src.booker import BookingOutcome
+
+        async def fake_book_race(slots, warm_pages=None):
+            booker_calls.append(warm_pages)
+            return BookingOutcome.CONFIRMED, slots[0]
+
+        monitor.booker.book_best_slot_race = AsyncMock(side_effect=fake_book_race)
+
+        await monitor.poll()
+
+        checker.pop_warm_page.assert_called()       # tried the reuse dict first
+        checker.pop_handoff_page.assert_called()    # fell back to the retained page
+        wp = booker_calls[0]
+        assert wp is not None and wp.get("2026-05-08") is handoff_page
 
     @pytest.mark.asyncio
     async def test_one_handoff_page_for_multiple_slots_same_date(self):

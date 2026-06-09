@@ -113,13 +113,22 @@ class TockMonitor:
         self._booking_secured = False
         self._sniper_active = False  # tracks whether we're in a sniper window
         self._sniper_slots_found = 0  # slots detected during current sniper window
+        # Dedup key for booking_failed embeds — suppresses per-poll spam when
+        # the same slot-set stays unbookable across a contested window.
+        self._last_booking_failed_key: tuple | None = None
 
         # Adaptive sniper mode: start concurrent, fall back to sequential if
         # Cloudflare error rate gets too high, retry concurrent after recovery.
         self._sniper_concurrent = True          # current mode for sniper polls
         self._sniper_error_window: list[float] = []  # rolling error rates (last N polls)
         self._SNIPER_WINDOW_SIZE   = 3    # look at last 3 polls to decide
-        self._SNIPER_ERROR_THRESH  = 0.20 # >20% errors → switch to sequential
+        # >30% errors → switch to sequential. Bumped from 0.20 after the
+        # 5/22 Fri Fuhuihua release windows showed 3-poll mode-flapping
+        # caused by routine 3/14 (21%) timeout bursts that look like CDN
+        # noise but are not the failure mode we should degrade for.
+        # 30% requires 5/14 sustained, which matches real Cloudflare-side
+        # problems worth giving up concurrency for.
+        self._SNIPER_ERROR_THRESH  = 0.30
         self._SNIPER_RECOVER_POLLS = 3    # consecutive clean sequential polls → try concurrent again
         self._sniper_sequential_clean = 0  # consecutive clean polls in sequential mode
 
@@ -268,12 +277,11 @@ class TockMonitor:
                     )
 
             # Date-page prewarm: 5 min before window (closer than cookie prewarm
-            # so pages don't sit idle for 15+ min before reload).
-            dates_prewarm_target = self._get_dates_prewarm_target()
-            if (
-                dates_prewarm_target
-                and dates_prewarm_target != self._session_dates_prewarmed_for
-            ):
+            # so pages don't sit idle for 15+ min before reload). Gated by
+            # _should_prewarm_dates() — only fires when sniper reuses pages
+            # (reuse off discards prewarmed pages; warm_session still warms CF).
+            dates_prewarm_target = self._should_prewarm_dates()
+            if dates_prewarm_target:
                 prewarm_failed = False
                 try:
                     prewarm_dates = self._get_prewarm_dates()
@@ -328,6 +336,13 @@ class TockMonitor:
             if was_sniper and not now_sniper:
                 self.notifier.sniper_mode_ended(self._sniper_slots_found)
                 await self.checker.close_sniper_pages()
+                # Also tear down the replay session at the window boundary so
+                # the next window starts fresh: this resets the replay
+                # circuit-breaker, the once-per-window capture-dumped flag, and
+                # the replay-diag poll counter. Without it, a tripped breaker
+                # would persist and capture would fire once EVER (not once per
+                # window). Idempotent — safe even if no replay session exists.
+                await self.checker.close_replay_session()
                 # Reset so pre-warm fires again if sniper re-arms (new window same day)
                 self._session_prewarmed_for = None
                 self._session_dates_prewarmed_for = None
@@ -451,6 +466,9 @@ class TockMonitor:
 
         if not slots:
             self.notifier.no_slots_found()
+            # Slots cleared — re-arm the failure-dedup so a later failure of the
+            # same slot-set alerts again rather than being suppressed.
+            self._last_booking_failed_key = None
             return
 
         # Track slots found during sniper window for end-of-window summary
@@ -476,49 +494,44 @@ class TockMonitor:
 
             # --- Attempt booking ---
             # Pass warm pages to booker (avoids re-navigation in either mode).
-            # Sniper drains _sniper_pages via pop_warm_page; normal-mode fast
-            # path drains _handoff_pages via pop_handoff_page. The booker
-            # treats both identically — pop()-and-own; close after success or
-            # failure. The two sources are kept in separate dicts so the
+            # Two page sources, one drain loop:
+            #   • sniper: reuse-on keeps the page in _sniper_pages (pop_warm_page);
+            #     reuse-off retains the found-slot page in _handoff_pages. Try
+            #     warm first, fall back to handoff.
+            #   • normal fast-path: only _handoff_pages.
+            # The booker treats them identically (pop()-and-own; close after
+            # success/failure). The two sources stay in separate dicts so the
             # sniper warm-page lifetime (across polls) doesn't leak into the
             # one-shot fast-path lifetime (single poll).
-            if self._sniper_active:
+            if self._sniper_active or enable_fast_handoff:
+                if self._sniper_active:
+                    def _drain(date_str: str):
+                        return (self.checker.pop_warm_page(date_str)
+                                or self.checker.pop_handoff_page(date_str))
+                    source = "warm"
+                else:
+                    _drain = self.checker.pop_handoff_page
+                    source = "handoff"
                 warm_pages = {}
                 seen: set[str] = set()
                 for s in slots:
                     if s.slot_date_str in seen:
-                        continue  # multiple slots per date share one warm page
+                        continue  # multiple slots per date share one page
                     seen.add(s.slot_date_str)
-                    wp = self.checker.pop_warm_page(s.slot_date_str)
-                    if wp is not None:
-                        warm_pages[s.slot_date_str] = wp
+                    p = _drain(s.slot_date_str)
+                    if p is not None:
+                        warm_pages[s.slot_date_str] = p
                 if warm_pages:
                     logger.info(
-                        f"[monitor] Passing {len(warm_pages)} warm page(s) to booker"
+                        f"[monitor] Passing {len(warm_pages)} {source} page(s) to booker"
                     )
                 else:
                     warm_pages = None
-            elif enable_fast_handoff:
-                warm_pages = {}
-                seen = set()
-                for s in slots:
-                    if s.slot_date_str in seen:
-                        continue
-                    seen.add(s.slot_date_str)
-                    hp = self.checker.pop_handoff_page(s.slot_date_str)
-                    if hp is not None:
-                        warm_pages[s.slot_date_str] = hp
-                if warm_pages:
-                    logger.info(
-                        f"[monitor] Passing {len(warm_pages)} handoff page(s) to "
-                        "booker (normal-mode fast path)"
-                    )
-                else:
-                    logger.info(
-                        "[monitor] No handoff page available — booker will fall "
-                        "back to fresh navigation"
-                    )
-                    warm_pages = None
+                    if enable_fast_handoff:
+                        logger.info(
+                            "[monitor] No handoff page available — booker will "
+                            "fall back to fresh navigation"
+                        )
 
             from src.booker import BookingOutcome
             outcome, booked_slot = await self.booker.book_best_slot_race(
@@ -527,6 +540,7 @@ class TockMonitor:
 
             if outcome == BookingOutcome.CONFIRMED:
                 self._booking_secured = True
+                self._last_booking_failed_key = None
                 logger.info(
                     f"[monitor] *** Booking secured: {booked_slot} ***\n"
                     "Bot will idle from now on. Safe to Ctrl+C."
@@ -546,6 +560,28 @@ class TockMonitor:
                 logger.warning(
                     "[monitor] All booking attempts failed this cycle. Will retry."
                 )
+                # Wire the (formerly dead) booking_failed embed so a failed
+                # cycle alerts the operator. Dedup by slot-set so a contested
+                # sniper window (continuous polling, same slots unbookable each
+                # poll) fires ONE embed, not dozens — which would hit Discord's
+                # rate limit and bury the signal. A new/changed failed slot-set
+                # re-alerts. 2026-06-05 post-mortem + PFR hardening.
+                failed_key = tuple(sorted(
+                    f"{s.slot_date_str}@{s.slot_time}" for s in slots
+                ))
+                if failed_key != self._last_booking_failed_key:
+                    self._last_booking_failed_key = failed_key
+                    self.notifier.booking_failed(
+                        slots,
+                        "all booking attempts failed (slot vanished, checkout "
+                        "never loaded, or payment prep failed) — see "
+                        "booking_failures/ for the captured page DOM (if any)",
+                    )
+                else:
+                    logger.debug(
+                        "[monitor] booking_failed embed suppressed — same "
+                        "slot-set already alerted this window"
+                    )
 
             # Flush any deferred tracker writes (sniper mode defers disk I/O)
             self.tracker.flush_deferred()
@@ -559,15 +595,17 @@ class TockMonitor:
                             await p.close()
                     except Exception:
                         pass
-            # Layer 2: any handoff pages still parked in the checker (e.g.
-            # an exception fired before we drained them). Sniper-warm pages
-            # are NOT closed here — they live across polls by design and
-            # close_sniper_pages() handles them at window end.
-            if enable_fast_handoff:
-                try:
-                    await self.checker.close_handoff_pages()
-                except Exception:
-                    pass
+            # Layer 2: any handoff pages still parked in the checker (e.g. an
+            # exception fired before we drained them, or a dry-run early-return).
+            # _handoff_pages is single-cycle in BOTH modes — normal-mode fast
+            # path AND sniper reuse-off found-slot retention — so always drain
+            # it here. Sniper-WARM pages (_sniper_pages, reuse ON) are NOT
+            # touched: they live across polls by design and close_sniper_pages()
+            # handles them at window end.
+            try:
+                await self.checker.close_handoff_pages()
+            except Exception:
+                pass
 
     def _apply_adaptive_switching(self, sniper_age: float) -> None:
         """Update concurrent/sequential mode based on rolling error rate.
@@ -592,8 +630,15 @@ class TockMonitor:
         if len(self._sniper_error_window) > self._SNIPER_WINDOW_SIZE:
             self._sniper_error_window.pop(0)
         rolling_rate = sum(self._sniper_error_window) / len(self._sniper_error_window)
+        # Codex HIGH: require a full sample window before any flip. With
+        # only 1-2 samples the rolling average is the single (or pair of)
+        # post-release polls — exactly the spike pattern the 5/22 incident
+        # showed, where one bad poll out of one immediately degraded the
+        # bot. Wait until we have N samples so 'rolling' actually means
+        # rolling.
+        window_full = len(self._sniper_error_window) >= self._SNIPER_WINDOW_SIZE
 
-        if self._sniper_concurrent and rolling_rate > self._SNIPER_ERROR_THRESH:
+        if self._sniper_concurrent and window_full and rolling_rate > self._SNIPER_ERROR_THRESH:
             self._sniper_concurrent = False
             self._sniper_sequential_clean = 0
             logger.warning(
@@ -673,6 +718,7 @@ class TockMonitor:
             if not self._sniper_active:
                 self._sniper_active = True
                 self._sniper_slots_found = 0
+                self._last_booking_failed_key = None  # re-arm failure dedup
                 # Reset adaptive state for each new sniper window
                 self._sniper_concurrent = True
                 self._sniper_error_window.clear()
@@ -845,6 +891,24 @@ class TockMonitor:
             if 0 < delta_sec <= PREWARM_DATES_BEFORE_MIN * 60:
                 return f"{day_name}@{start_str}"
         return None
+
+    def _should_prewarm_dates(self) -> str | None:
+        """Target ('DayName@HH:MM') if date-page prewarm should fire now, else None.
+
+        Date-page prewarm pre-opens one page per target date so the first sniper
+        poll can reload them — but that only pays off when sniper REUSES pages.
+        With reuse off (the default) the pages are discarded, so prewarm would
+        just burn pre-window time (and can delay the first poll) for nothing; the
+        cookie prewarm (warm_session) already refreshes the Cloudflare session.
+        Returns None unless reuse is enabled AND a window is in range AND we have
+        not already prewarmed for it this cycle.
+        """
+        if not getattr(self.config, "sniper_reuse_pages", False):
+            return None
+        target = self._get_dates_prewarm_target()
+        if target is None or target == self._session_dates_prewarmed_for:
+            return None
+        return target
 
     def _get_prewarm_dates(self) -> list[date]:
         """Return up to 7 target dates within the next ~10 days to prewarm.
